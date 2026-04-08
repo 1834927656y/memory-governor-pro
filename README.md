@@ -16,7 +16,7 @@
 
 ### 目录
 
-- [核心功能](#核心功能)
+- [核心功能](#核心功能通俗版)
 - [项目来源与借鉴](#项目来源与借鉴)
 - [设计思路](#设计思路)
 - [快速开始](#快速开始)
@@ -31,18 +31,35 @@
 
 ### 快速导航（优先阅读）
 
-1. **功能介绍**：先看 [核心功能](#核心功能)  
+1. **功能介绍**：先看 [核心功能（通俗版）](#核心功能通俗版)  
 2. **借鉴项目**：再看 [项目来源与借鉴](#项目来源与借鉴)  
 3. **实现思路**：然后看 [设计思路](#设计思路)  
 4. **如何使用**：最后看 [快速开始](#快速开始) 和 [完整配置示例](#完整配置示例)
 
-### 项目简介
+### 核心功能
 
-`memory-governor-pro` 是一个一体化 skill，目标是解决三类问题：
+如果把一个长期运行的 agent 比作“一个需要持续交付的同事”，这个项目做的事情可以概括为：
 
-1. **长期记忆可用性**：会话内容可持续沉淀并可检索注入。  
-2. **长周期任务稳定性**：在上下文压力下仍能保持任务连续性。  
-3. **治理可审计可回滚**：所有精炼、归档、清理行为可追踪可恢复。
+1. **让它记得住**  
+   普通会话容易“聊久就忘”。本项目把关键信息写入向量记忆库，不再只依赖当前对话窗口。
+
+2. **让它记得准**  
+   不是把历史原文全部塞进上下文，而是分层注入：  
+   - 自改进规则（最宽松命中，保证规范不丢）  
+   - 主记忆（保持 memory-lancedb-pro 原有稳定召回）  
+   - 治理记忆（最严格过滤，减少噪声）  
+   用最短上下文放最关键信息。
+
+3. **让长任务不中断思路**  
+   当上下文接近上限或任务结束时，触发精炼沉淀进展，后续继续读取，降低上下文压缩导致的“任务断片”。
+
+4. **让行为可审计、可回滚**  
+   精炼、归档、轮转全程落台账；会话文件归档保留；可按日期/批次恢复，不是黑盒。
+
+5. **让会话文件更干净**  
+   精炼后 `sessions` 目录收敛为单活动 `jsonl`（仅保留未精炼增量），历史进入归档。
+
+一句话：**用更短上下文，保留更完整有效记忆，并把长周期稳定性问题变成可治理、可追踪的工程能力。**
 
 ### 项目来源与借鉴
 
@@ -55,30 +72,13 @@
 
 > 本仓库不是上游仓库 1:1 镜像，以本仓代码和文档为准。
 
-### 核心功能
-
-- **memory-lancedb-pro 插件能力**
-  - 记忆写入 / 检索 /更新 /遗忘
-  - auto-capture + auto-recall
-  - 混合检索（vector + BM25 + 可选 rerank）
-  - 多作用域隔离与管理工具
-- **Governor 治理能力**
-  - 会话精炼入治理向量库
-  - 会话轮转归档与单活动会话文件收敛
-  - 初始化回填、阈值触发、任务结束触发
-  - 审计与回滚（inspect / restore / clear / purge）
-- **Self-improvement 规则能力**
-  - 规则写入 LanceDB（`opencl_si_rule: true`）
-  - 提醒注入与规则提取/复盘工具
-  - 与插件注入链路合并去重
-
 ### 设计思路
 
 #### 1) 分层数据面
 
 - **主记忆库**：面向在线对话，存“可被直接召回”的记忆  
-- **治理记忆库**：面向精炼和长期留存，存“全量会话压缩后的治理条目”  
-- **归档会话文件**：面向审计和回滚，运行时不直接依赖
+- **治理记忆库**：面向精炼和长期留存，存“会话治理条目”  
+- **归档会话文件**：面向审计与回滚，运行时不直接依赖
 
 #### 2) 分层注入面（最短上下文 + 最全有效输入）
 
@@ -93,30 +93,23 @@
 - 阈值触发用于上下文临界保护  
 - 所有关键操作写审计台账，可回滚
 
-### 架构说明
-
-| 组件 | 入口 | 主要职责 |
-|---|---|---|
-| 插件 | `index.ts`, `openclaw.plugin.json` | 记忆读写、自动捕获/召回、三源注入编排 |
-| Governor CLI | `src/index.ts`, `config.json` | 精炼、归档、回填、审计、回滚 |
-| 自改进资源 | `bundled/self-improvement/` | 规则模板、脚本、学习资产 |
-| 治理库适配 | `src/lib/lancedbStore.ts` | 治理向量库写入/严格检索 |
-| 注入编排 | `src/lib/unified-injection.ts` | 分层预算与候选裁剪 |
-
 ### 快速开始
 
 #### 1) 安装依赖
 
 ```bash
+#进入插件目录
 cd /path/to/memory-governor-pro
 npm install
 ```
 
 #### 2) 设置环境变量（示例）
 
+
 Linux/macOS:
 
 ```bash
+#也可以使用env文件存放
 export OPENCLAW_HOME="$HOME/.openclaw"
 export JINA_API_KEY="your_key"
 ```
@@ -124,6 +117,7 @@ export JINA_API_KEY="your_key"
 Windows PowerShell:
 
 ```powershell
+#也可以使用env文件存放
 $env:OPENCLAW_HOME="$env:USERPROFILE\.openclaw"
 $env:JINA_API_KEY="your_key"
 ```
@@ -131,6 +125,7 @@ $env:JINA_API_KEY="your_key"
 #### 3) 安装 skill 到 OpenClaw
 
 ```bash
+#最后的main与xunc1替换为自身的agentid
 node scripts/manage-plugin-install.mjs install --agents main,xunc1
 ```
 
@@ -147,6 +142,24 @@ openclaw plugins info memory-lancedb-pro
 ```bash
 npm run governor:verify-layered-injection
 ```
+
+### 项目简介
+
+`memory-governor-pro` 是一个一体化 skill，目标是解决三类问题：
+
+1. **长期记忆可用性**：会话内容可持续沉淀并可检索注入。  
+2. **长周期任务稳定性**：在上下文压力下仍能保持任务连续性。  
+3. **治理可审计可回滚**：所有精炼、归档、清理行为可追踪可恢复。
+
+### 架构说明
+
+| 组件 | 入口 | 主要职责 |
+|---|---|---|
+| 插件 | `index.ts`, `openclaw.plugin.json` | 记忆读写、自动捕获/召回、三源注入编排 |
+| Governor CLI | `src/index.ts`, `config.json` | 精炼、归档、回填、审计、回滚 |
+| 自改进资源 | `bundled/self-improvement/` | 规则模板、脚本、学习资产 |
+| 治理库适配 | `src/lib/lancedbStore.ts` | 治理向量库写入/严格检索 |
+| 注入编排 | `src/lib/unified-injection.ts` | 分层预算与候选裁剪 |
 
 ### 完整配置示例
 
@@ -316,7 +329,7 @@ npm run governor:verify-layered-injection
 A: 主库服务在线召回，治理库服务精炼审计与长期留存，分离后稳定性更高。  
 
 **Q2: 会话文件还会保留吗？**  
-A: 会保留，但以归档为主；运行时注入建议只走向量库。  
+A: 会保留，但以归档为主；运行时注入只走向量库。  
 
 **Q3: 能否按 agent 精细化配置？**  
 A: 可以，通过 `enabledAgents` 和 agent override 文件实现。  
@@ -437,7 +450,32 @@ npm run governor:verify-layered-injection
 
 ### Full Configuration Example
 
-See the Chinese section for the complete JSON example (same config applies to both languages).
+```json
+{
+  "plugins": {
+    "entries": {
+      "memory-lancedb-pro": {
+        "enabled": true,
+        "config": {
+          "autoCapture": true,
+          "autoRecall": true,
+          "retrieval": { "mode": "hybrid" },
+          "governor": {
+            "rotateOnAgentEnd": true,
+            "rotateOnAgentEndCooldownMs": 120000,
+            "runtimeVectorOnlyRecall": true,
+            "injectionLayerBudget": {
+              "selfImprovement": 0.2,
+              "memory": 0.5,
+              "governance": 0.3
+            }
+          }
+        }
+      }
+    }
+  }
+}
+```
 
 ### Configuration Reference
 
