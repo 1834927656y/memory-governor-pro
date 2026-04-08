@@ -20,6 +20,13 @@ This skill implements:
 9. Governance with agent-only-day exclusion from hit/degrade/retire calculations.
 10. Default layout: OpenClaw plugin + governor CLI + bundled self-improvement in one tree; optional `upstream/memory-lancedb-pro` for forked layouts.
    - Self-improvement skill path: `bundled/self-improvement` (see `INTEGRATION.md` there)
+11. Layered injection (runtime):
+   - self-improvement: most permissive keyword-triggered recall
+   - memory-lancedb-pro: existing recall behavior
+   - governance: strict recall with low quota
+12. Post-task rotation:
+   - every `agent_end` can trigger rotate for current day
+   - session directory normalized to a single active `*.jsonl` (unrefined content only)
 
 ## Important Safety Rules
 
@@ -27,4 +34,23 @@ This skill implements:
 - This skill never performs per-turn direct injection.
 - Session deletion runs only after successful ingestion and audit writes.
 - Audit / rollback CLI: `audit-inspect`, `audit-restore-sessions`, `audit-clear-rotation`, `audit-purge-memories`; optional `preRefineSessionSnapshot` in `config.json` for merge-target restore.
+- Recommended governor config overrides:
+  - `rotateOnAgentEnd=true`
+  - `rotateOnAgentEndCooldownMs=120000`
+  - `runtimeVectorOnlyRecall=true`
+  - `injectionLayerBudget={ selfImprovement:0.2, memory:0.5, governance:0.3 }`
+
+## Install / Remove (gateway runtime)
+
+- Install/init (relative path, cross-env):
+  - `node scripts/manage-plugin-install.mjs install --agents main`
+- Uninstall (remove load path + clear enabledAgents):
+  - `node scripts/manage-plugin-install.mjs uninstall`
+- Uninstall + disable plugin entry:
+  - `node scripts/manage-plugin-install.mjs uninstall --disable`
+
+Notes:
+- Plugin load path is `skills/memory-governor-pro` (no absolute path).
+- Agent enable list is stored in `openclaw.json` at:
+  - `plugins.entries.memory-lancedb-pro.config.governor.enabledAgents`
 

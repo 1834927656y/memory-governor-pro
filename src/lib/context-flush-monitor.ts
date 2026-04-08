@@ -69,6 +69,8 @@ export function collectAllSessionPressure(
     if (!fs.existsSync(sessionsRoot)) continue;
     for (const file of fs.readdirSync(sessionsRoot)) {
       if (!file.endsWith(".jsonl")) continue;
+      /* reset / deleted 归档为只读历史，不计入上下文压力（与 jsonlSessions 语义对齐） */
+      if (file.includes(".jsonl.reset.") || file.includes(".jsonl.deleted.")) continue;
       const full = path.join(sessionsRoot, file);
       let bytes = 0;
       try {

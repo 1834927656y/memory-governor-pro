@@ -1,73 +1,168 @@
-# memory-governor-pro（中文版）
+# memory-governor-pro
 
-本仓库是 **一体化 OpenClaw 记忆工程**：在同一skill里同时提供 **长期记忆插件（memory-lancedb-pro）**、**日终/阈值治理 CLI（governor）**，以及 **随仓分发的自改进技能资源（bundled/self-improvement）**。  
-部署时通常把本目录作为 **Cursor / OpenClaw 的 skill**（见根目录 `SKILL.md`），并在 `openclaw.json` 中启用同名插件入口。
+[中文](#中文文档) | [English](#english-documentation)
 
-**项目借鉴**：本仓库在设计与实现上 **借鉴并延续** 以下两个开源脉络，并在同一目录树内与 **governor 治理**、OpenClaw 合并注入等能力做了整合与扩展（不等同于官方上游的 1:1 镜像，以本仓代码与文档为准）。
+一个一体化的 OpenClaw 记忆工程项目，包含：
 
-1. **[CortexReach/memory-lancedb-pro](https://github.com/CortexReach/memory-lancedb-pro)** — 长期记忆 LanceDB 插件、混合检索与 OpenClaw 集成思路；本仓 `package.json` 的 `repository` 字段仍指向该仓库，便于对照主线演进。  
-2. **[pskoett/pskoett-ai-skills 内的 self-improvement 技能](https://github.com/pskoett/pskoett-ai-skills/tree/main/skills/self-improvement)** — 自改进工作流、`.learnings` 资产与脚本形态；本仓以 `bundled/self-improvement/` **随插件分发**，并与插件侧 LanceDB 提醒、`self_improvement_*` 工具链等深度集成。
+- **长期记忆插件**（`memory-lancedb-pro`）
+- **Governor 治理管道**（日常 / 阈值 / 审计 / 回滚）
+- **随仓分发的自改进技能资源**（`bundled/self-improvement`）
 
----
-
-## 1. 三部分分别做什么
-
-| 部分 | 入口 / 配置 | 职责 |
-|------|-------------|------|
-| **插件** | `index.ts`、`openclaw.plugin.json` | 向量记忆、混合检索、`memory_*` 工具、自动抓取/召回、反思与自改进钩子、**合并注入**（召回 + 反思 + LanceDB 提醒）与跨源去重 |
-| **Governor** | `config.json`、`src/index.ts`（Commander CLI） | 按日历日精炼会话、写入 **治理专用** LanceDB、轮转/归档会话 `jsonl`、审计与可选快照、内置网关心跳调度 |
-| **自改进资源** | `bundled/self-improvement/` | `SKILL.md`、可选 OpenClaw `hooks`、`scripts`、`.learnings` 资产模板；与插件逻辑配合见 `INTEGRATION.md` |
+> 面向长周期运行的 agent 设计，强调记忆连续性稳定、审计可追溯，以及低上下文预算下的高质量注入。
 
 ---
 
-## 2. 记忆与自改进数据落在哪里
+## 中文文档
 
-- **主记忆库（会话里 agent 用的那份）**  
-  - 配置：`openclaw.json` → `plugins.entries.memory-lancedb-pro.config.dbPath`（未写则用插件默认路径）。  
-  - 内容：对话抽取的事实/偏好、`memory_store`、自动抓取、反思映射条目等。  
-- **自改进「规则」条目（插件写的 SI 规则）**  
-  - 存在 **主记忆库同一 Lance 表** 中，元数据带 **`opencl_si_rule: true`**、`si_entry_id`（如 `LRN-…`/`ERR-…`）、`si_implementation_status` 等。  
-  - **不会**进入普通 `autoRecall` 注入（代码侧已过滤）。  
-  - 工作区 **`.learnings/SI_IMPLEMENTATION_AUDIT.md`** 仅追加**审计行**（创建/升级 skill 等事件），**不是**规则正文存储源。  
-  - `.learnings/LEARNINGS.md` 等若由模板新建，多为**说明占位**；历史填满的旧文件不会被插件清空。  
-- **自我改进「提醒」固定行**  
-  - 稳定 id 存于 LanceDB（缺则嵌入种子）；在 `before_prompt_build` 里与其它注入块一起做语义去重。  
-- **治理记忆库**  
-  - 配置：`config.json` → `lancedb.dbPath`（默认 `memory/lancedb-governor/{AGENT_ID}`）。  
-  - 日终精炼、`context-pack` 治理侧查询等主要写这里。  
+### 目录
 
-**切勿**把插件 `dbPath` 与治理 `lancedb.dbPath` 指到**同一目录**，以免争用与隔离失效。
+- [核心功能](#核心功能)
+- [项目来源与借鉴](#项目来源与借鉴)
+- [设计思路](#设计思路)
+- [快速开始](#快速开始)
+- [项目简介](#项目简介)
+- [架构说明](#架构说明)
+- [完整配置示例](#完整配置示例)
+- [配置项详解](#配置项详解)
+- [常用命令](#常用命令)
+- [运维与排障](#运维与排障)
+- [FAQ](#faq)
+- [许可证](#许可证)
 
----
+### 快速导航（优先阅读）
 
-## 3. 注入与上下文
+1. **功能介绍**：先看 [核心功能](#核心功能)  
+2. **借鉴项目**：再看 [项目来源与借鉴](#项目来源与借鉴)  
+3. **实现思路**：然后看 [设计思路](#设计思路)  
+4. **如何使用**：最后看 [快速开始](#快速开始) 和 [完整配置示例](#完整配置示例)
 
-- **`before_prompt_build`（priority 10）**：合并 **LanceDB 自改进提醒 + auto-recall + reflection**，再用与 `uniqueInjection` 一致的阈值做**段落级去重**；`autoRecall` 命中时返回的注入可标 `ephemeral`。  
-- **Context flush（priority 9）**：按占用比例触发时写 `context-pack.md` 等（治理侧路径），与主链路的 `autoRecall` 共用窗口预算；需保证 **`openclaw.json` 里只有一个** 名称含 `memory`/`lancedb`/`recall` 的注入插件，否则单注入源校验会挡召回/flush。
+### 项目简介
 
----
+`memory-governor-pro` 是一个一体化 skill，目标是解决三类问题：
 
-## 4. 环境变量与部署要点
+1. **长期记忆可用性**：会话内容可持续沉淀并可检索注入。  
+2. **长周期任务稳定性**：在上下文压力下仍能保持任务连续性。  
+3. **治理可审计可回滚**：所有精炼、归档、清理行为可追踪可恢复。
 
-- 容器内建议在 **`docker-compose.yml`** 注入 `OPENCLAW_HOME`、`OPENCLAW_AGENT_ID`、嵌入/重排所用 **API Key**（如 `JINA_API_KEY`），再在挂载的 `openclaw.json` 里用 `${VAR}` 引用。  
-- Linux：`export OPENCLAW_HOME=~/.openclaw`（或实际数据目录）。  
-- Windows PowerShell：`$env:OPENCLAW_HOME="$env:USERPROFILE\.openclaw"` 等。  
+### 项目来源与借鉴
 
-本目录安装依赖：
+本项目明确借鉴并扩展了以下开源工作：
+
+- [CortexReach/memory-lancedb-pro](https://github.com/CortexReach/memory-lancedb-pro)  
+  用于长期记忆、混合检索、OpenClaw 插件集成主链路。
+- [pskoett-ai-skills / self-improvement](https://github.com/pskoett/pskoett-ai-skills/tree/main/skills/self-improvement)  
+  用于自改进规则工作流与 `.learnings` 资产组织方式。
+
+> 本仓库不是上游仓库 1:1 镜像，以本仓代码和文档为准。
+
+### 核心功能
+
+- **memory-lancedb-pro 插件能力**
+  - 记忆写入 / 检索 /更新 /遗忘
+  - auto-capture + auto-recall
+  - 混合检索（vector + BM25 + 可选 rerank）
+  - 多作用域隔离与管理工具
+- **Governor 治理能力**
+  - 会话精炼入治理向量库
+  - 会话轮转归档与单活动会话文件收敛
+  - 初始化回填、阈值触发、任务结束触发
+  - 审计与回滚（inspect / restore / clear / purge）
+- **Self-improvement 规则能力**
+  - 规则写入 LanceDB（`opencl_si_rule: true`）
+  - 提醒注入与规则提取/复盘工具
+  - 与插件注入链路合并去重
+
+### 设计思路
+
+#### 1) 分层数据面
+
+- **主记忆库**：面向在线对话，存“可被直接召回”的记忆  
+- **治理记忆库**：面向精炼和长期留存，存“全量会话压缩后的治理条目”  
+- **归档会话文件**：面向审计和回滚，运行时不直接依赖
+
+#### 2) 分层注入面（最短上下文 + 最全有效输入）
+
+- `self-improvement`：最宽松（规则关键词触发）
+- `memory-lancedb-pro`：中等（保持原召回策略）
+- `governance`：最严格（高约束、低配额）
+
+#### 3) 生命周期治理面
+
+- 每任务结束可触发精炼  
+- 日终与初始化回填兜底  
+- 阈值触发用于上下文临界保护  
+- 所有关键操作写审计台账，可回滚
+
+### 架构说明
+
+| 组件 | 入口 | 主要职责 |
+|---|---|---|
+| 插件 | `index.ts`, `openclaw.plugin.json` | 记忆读写、自动捕获/召回、三源注入编排 |
+| Governor CLI | `src/index.ts`, `config.json` | 精炼、归档、回填、审计、回滚 |
+| 自改进资源 | `bundled/self-improvement/` | 规则模板、脚本、学习资产 |
+| 治理库适配 | `src/lib/lancedbStore.ts` | 治理向量库写入/严格检索 |
+| 注入编排 | `src/lib/unified-injection.ts` | 分层预算与候选裁剪 |
+
+### 快速开始
+
+#### 1) 安装依赖
 
 ```bash
 cd /path/to/memory-governor-pro
 npm install
 ```
 
----
+#### 2) 设置环境变量（示例）
 
-## 5. `openclaw.json` 插件配置示例（Jina 嵌入 + 重排）
+Linux/macOS:
+
+```bash
+export OPENCLAW_HOME="$HOME/.openclaw"
+export JINA_API_KEY="your_key"
+```
+
+Windows PowerShell:
+
+```powershell
+$env:OPENCLAW_HOME="$env:USERPROFILE\.openclaw"
+$env:JINA_API_KEY="your_key"
+```
+
+#### 3) 安装 skill 到 OpenClaw
+
+```bash
+node scripts/manage-plugin-install.mjs install --agents main,xunc1
+```
+
+#### 4) 校验与重启
+
+```bash
+openclaw config validate
+openclaw gateway restart
+openclaw plugins info memory-lancedb-pro
+```
+
+#### 5) 运行健康检查
+
+```bash
+npm run governor:verify-layered-injection
+```
+
+### 完整配置示例
+
+> 以下示例展示常用生产配置（含三层注入预算、任务结束精炼、严格治理检索）。
 
 ```json
 {
   "plugins": {
-    "slots": { "memory": "memory-lancedb-pro" },
+    "slots": {
+      "memory": "memory-lancedb-pro"
+    },
+    "load": {
+      "paths": [
+        "skills/memory-governor-pro"
+      ]
+    },
     "entries": {
       "memory-lancedb-pro": {
         "enabled": true,
@@ -80,14 +175,44 @@ npm install
           },
           "retrieval": {
             "mode": "hybrid",
+            "vectorWeight": 0.7,
+            "bm25Weight": 0.3,
+            "minScore": 0.3,
             "rerank": "cross-encoder",
             "rerankProvider": "jina",
             "rerankApiKey": "${JINA_API_KEY}",
             "rerankEndpoint": "https://api.jina.ai/v1/rerank",
-            "rerankModel": "jina-reranker-v2-base-multilingual"
+            "rerankModel": "jina-reranker-v2-base-multilingual",
+            "candidatePoolSize": 60
           },
           "autoCapture": true,
-          "autoRecall": true
+          "autoRecall": true,
+          "autoRecallMaxItems": 4,
+          "autoRecallMaxChars": 900,
+          "autoRecallPerItemMaxChars": 220,
+          "recallMode": "adaptive",
+          "smartExtraction": true,
+          "extractMinMessages": 4,
+          "extractMaxChars": 8000,
+          "sessionStrategy": "memoryReflection",
+          "enableManagementTools": true,
+          "governor": {
+            "enabledAgents": ["main", "xunc1"],
+            "rotateOnAgentEnd": true,
+            "rotateOnAgentEndCooldownMs": 120000,
+            "runtimeVectorOnlyRecall": true,
+            "injectionLayerBudget": {
+              "selfImprovement": 0.2,
+              "memory": 0.5,
+              "governance": 0.3
+            },
+            "internalScheduler": {
+              "enabled": true,
+              "runAtLocalTime": "00:05",
+              "catchUpOnStartup": true,
+              "firstInstallBackfillEnabled": true
+            }
+          }
         }
       }
     }
@@ -95,11 +220,208 @@ npm install
 }
 ```
 
-更完整的键与默认值以 **`openclaw.plugin.json`** 的 `configSchema` 为准。
+### 配置项详解
+
+#### A. 插件核心
+
+| 配置 | 说明 | 建议 |
+|---|---|---|
+| `embedding.provider` | 嵌入服务协议（OpenAI 兼容） | 固定 `openai-compatible` |
+| `embedding.apiKey` | 嵌入 API 密钥（可 `${ENV}`） | 放环境变量 |
+| `embedding.baseURL` | 嵌入服务地址 | 与 provider 对齐 |
+| `embedding.model` | 向量模型 | 统一全局模型，避免维度漂移 |
+| `dbPath` | 主记忆库路径 | 不与治理库复用 |
+
+#### B. 检索与注入
+
+| 配置 | 说明 | 建议 |
+|---|---|---|
+| `retrieval.mode` | `hybrid`/`vector` | 生产建议 `hybrid` |
+| `vectorWeight`/`bm25Weight` | 混合权重 | 0.7/0.3 起步 |
+| `rerank*` | 重排配置 | 强相关场景建议启用 |
+| `autoRecall` | 自动注入开关 | 长任务建议开启 |
+| `autoRecallMaxItems` | 单轮注入条数上限 | 3-6 |
+| `autoRecallMaxChars` | 单轮注入总字符预算 | 600-1200 |
+| `recallMode` | full/summary/adaptive/off | 推荐 `adaptive` |
+
+#### C. 抽取与压缩
+
+| 配置 | 说明 | 建议 |
+|---|---|---|
+| `autoCapture` | 自动抓取会话记忆 | 建议开启 |
+| `smartExtraction` | LLM 结构化抽取 | 建议开启 |
+| `extractMinMessages` | 触发抽取最少消息数 | 4 |
+| `extractMaxChars` | 抽取输入最大字符 | 8000 |
+| `sessionCompression.enabled` | 抽取前压缩 | 高并发时建议开启 |
+
+#### D. Governor 扩展
+
+| 配置 | 说明 | 建议 |
+|---|---|---|
+| `governor.enabledAgents` | 启用治理的 agent 列表 | 明确列出 |
+| `rotateOnAgentEnd` | 每任务结束触发精炼 | `true` |
+| `rotateOnAgentEndCooldownMs` | 任务结束精炼冷却 | 120000 |
+| `runtimeVectorOnlyRecall` | 运行时只读向量库，不回读会话文件 | `true` |
+| `injectionLayerBudget` | 三层注入预算（SI/Memory/Governance） | 0.2/0.5/0.3 |
+| `internalScheduler.enabled` | 内建调度开关 | `true` |
+| `firstInstallBackfillEnabled` | 首装回填 | `true` |
+
+#### E. 路径隔离（非常重要）
+
+| 项 | 路径 | 要点 |
+|---|---|---|
+| 主记忆库 | `plugins.entries.memory-lancedb-pro.config.dbPath` | 在线召回主来源 |
+| 治理记忆库 | `config.json -> lancedb.dbPath` | 治理专用，严禁复用主库 |
+| 会话归档 | `agents/<agent>/sessions/archive/` | 审计与回滚使用 |
+
+### 常用命令
+
+#### memory-pro
+
+```bash
+openclaw memory-pro list
+openclaw memory-pro search "keyword"
+openclaw memory-pro stats
+openclaw memory-pro export --output memories.json
+openclaw memory-pro import memories.json
+```
+
+#### Governor
+
+```bash
+npm run governor:daily-rotate
+npm run governor:daily-rotate:all-agents
+npm run governor:bootstrap
+npm run governor:flush
+npm run governor:governance
+npm run governor:audit-inspect
+npm run governor:audit-restore
+npm run governor:audit-clear-rotation
+npm run governor:audit-purge-memories
+npm run governor:archive-prune
+npm run governor:verify-layered-injection
+```
+
+### 运维与排障
+
+- **无注入内容**：检查 `autoRecall`、`recallMode`、`dbPath`、API Key。  
+- **治理注入过多**：提高严格阈值/降低治理预算。  
+- **双提醒注入**：避免重复启用 self-improvement hook 与插件提醒。  
+- **库冲突**：确保主库与治理库路径隔离。  
+- **上下文仍膨胀**：降低 `autoRecallMaxChars`，并开启 `runtimeVectorOnlyRecall`。  
+
+### FAQ
+
+**Q1: 为什么要分主库和治理库？**  
+A: 主库服务在线召回，治理库服务精炼审计与长期留存，分离后稳定性更高。  
+
+**Q2: 会话文件还会保留吗？**  
+A: 会保留，但以归档为主；运行时注入建议只走向量库。  
+
+**Q3: 能否按 agent 精细化配置？**  
+A: 可以，通过 `enabledAgents` 和 agent override 文件实现。  
+
+### 许可证
+
+MIT
 
 ---
 
-## 6. 启动与自测
+## English Documentation
+
+### Table of Contents
+
+- [Features](#features)
+- [Inspirations and Credits](#inspirations-and-credits)
+- [Design Principles](#design-principles)
+- [Getting Started](#getting-started)
+- [Overview](#overview)
+- [Architecture](#architecture)
+- [Full Configuration Example](#full-configuration-example)
+- [Configuration Reference](#configuration-reference)
+- [Commands](#commands)
+- [Operations and Troubleshooting](#operations-and-troubleshooting)
+- [FAQ](#faq-1)
+- [License](#license)
+
+### Start Here (Read First)
+
+1. **Feature Overview**: [Features](#features)  
+2. **Project Inspirations**: [Inspirations and Credits](#inspirations-and-credits)  
+3. **Implementation Idea**: [Design Principles](#design-principles)  
+4. **How to Use**: [Getting Started](#getting-started) and [Full Configuration Example](#full-configuration-example)
+
+### Overview
+
+`memory-governor-pro` is an integrated OpenClaw skill suite that combines:
+
+- Long-term memory plugin (`memory-lancedb-pro`)
+- Governor governance pipeline (rotation, flush, rollback, audit)
+- Bundled self-improvement assets (`bundled/self-improvement`)
+
+It is designed for long-running agents that require memory continuity with strict auditing and compact prompt injection.
+
+### Inspirations and Credits
+
+This project builds upon and extends:
+
+- [CortexReach/memory-lancedb-pro](https://github.com/CortexReach/memory-lancedb-pro)
+- [pskoett-ai-skills / self-improvement](https://github.com/pskoett/pskoett-ai-skills/tree/main/skills/self-improvement)
+
+This repository is not a 1:1 mirror of upstream projects. The code and docs here are the source of truth.
+
+### Features
+
+- Hybrid long-term memory retrieval and management tools
+- Auto-capture and auto-recall with dedup and governance filters
+- Layered injection strategy:
+  - permissive self-improvement rule hits
+  - unchanged memory-lancedb-pro recall
+  - strict governance retrieval
+- Task-end rotation, threshold-triggered flush, and bootstrap backfill
+- Auditable archive + rollback-oriented state records
+
+### Design Principles
+
+1. **Separation of concerns**
+   - runtime memory store vs governance memory store
+2. **Layered injection**
+   - strict budgeted orchestration across memory sources
+3. **Audit-first governance**
+   - every rotation/merge/archive action is traceable and recoverable
+4. **Context efficiency**
+   - shortest practical prompt context with maximal useful recall
+
+### Architecture
+
+| Component | Entry | Responsibility |
+|---|---|---|
+| Plugin | `index.ts` | recall/capture/injection orchestration |
+| Governor CLI | `src/index.ts` | rotate/flush/backfill/audit/rollback |
+| Self-improvement assets | `bundled/self-improvement` | rules, templates, helper scripts |
+| Governance store adapter | `src/lib/lancedbStore.ts` | strict governance retrieval |
+
+### Getting Started
+
+```bash
+cd /path/to/memory-governor-pro
+npm install
+```
+
+Set environment variables (example):
+
+```bash
+export OPENCLAW_HOME="$HOME/.openclaw"
+export JINA_API_KEY="your_key"
+```
+
+Install:
+
+```bash
+node scripts/manage-plugin-install.mjs install --agents main,xunc1
+```
+
+Validate and restart:
 
 ```bash
 openclaw config validate
@@ -107,68 +429,56 @@ openclaw gateway restart
 openclaw plugins info memory-lancedb-pro
 ```
 
----
-
-## 7. CLI 一览
-
-### 7.1 `openclaw memory-pro`（插件自带）
+Verify layered setup:
 
 ```bash
-openclaw memory-pro list
-openclaw memory-pro search "关键词"
-openclaw memory-pro stats
-openclaw memory-pro export --output memories.json
-openclaw memory-pro import memories.json
+npm run governor:verify-layered-injection
 ```
 
-### 7.2 Governor（`package.json` scripts，在本仓库目录执行）
+### Full Configuration Example
 
-| 命令 | 说明 |
-|------|------|
-| `npm run governor:daily-rotate` | 推荐：按配置时区处理「昨夜」+ 可补跑欠账；`--all-agents` 处理多 agent |
-| `npm run governor:nightly` | 单日 `rotate` |
-| `npm run governor:bootstrap` | 历史回填 |
-| `npm run governor:flush` | 阈值 context-pack |
-| `npm run governor:governance` | 生命周期治理 |
-| `npm run governor:vendor:init-self-improving` | 从仓内 `bundled/self-improvement/assets` 拷贝 `.learnings` 样板（含审计文件） |
-| `npm run governor:vendor:status` | 打印本机解析到的插件根与 bundled 路径 |
-| `npm run governor:audit-inspect` / `audit-restore` / `audit-clear-rotation` / `audit-purge-memories` / `archive-prune` | 审计、回滚、治理库按日清理、归档 TTL |
+See the Chinese section for the complete JSON example (same config applies to both languages).
 
-内置调度：`config.json` 里 `internalScheduler.enabled`；可用环境变量 `MEMORY_GOVERNOR_DISABLE_INTERNAL_SCHEDULER=1` 关闭。Windows 可配合 `scripts/install-windows-daily-rotate-task.ps1`。
+### Configuration Reference
 
----
+Key recommendations:
 
-## 8. 重要文件（按职责）
+- `governor.rotateOnAgentEnd = true`
+- `governor.rotateOnAgentEndCooldownMs = 120000`
+- `governor.runtimeVectorOnlyRecall = true`
+- `governor.injectionLayerBudget = { selfImprovement: 0.2, memory: 0.5, governance: 0.3 }`
 
-| 路径 | 说明 |
-|------|------|
-| `index.ts` | OpenClaw 插件：hook、合并注入、反思、自改进、服务等 |
-| `cli.ts` | `memory-pro` 子命令 |
-| `openclaw.plugin.json` | 插件 id、版本、**配置 Schema** |
-| `config.json` | Governor：会话根、状态目录、治理 LanceDB、调度、context flush、`rotation`/`governance` |
-| `src/` | Store、检索、嵌入、工具、治理子模块、`self-improvement/*`、`lib/*` |
-| `bundled/self-improvement/` | 自改进 SKILL、hooks、`scripts`、assets（含 `SI_IMPLEMENTATION_AUDIT.md` 模板） |
-| `scripts/` | 同步版本、维护、技能测试、计划任务安装等 |
+### Commands
 
----
+```bash
+npm run governor:daily-rotate
+npm run governor:daily-rotate:all-agents
+npm run governor:bootstrap
+npm run governor:flush
+npm run governor:governance
+npm run governor:audit-inspect
+npm run governor:audit-restore
+npm run governor:audit-clear-rotation
+npm run governor:audit-purge-memories
+npm run governor:archive-prune
+npm run governor:verify-layered-injection
+```
 
-## 9. 兼容与版本
+### Operations and Troubleshooting
 
-- **OpenClaw**：建议与当前宿主发行说明一致（如 `2026.x`）。  
-- **系统**：Linux / Windows；容器需保证 `OPENCLAW_HOME` 与卷一致。  
-- **注入**：统一走 `before_prompt_build` 新架构。
+- No recall: check API keys, `autoRecall`, and `dbPath`.
+- Excess governance injection: tighten strict retrieval and reduce governance budget.
+- Duplicate reminders: avoid enabling multiple reminder providers simultaneously.
+- Context bloat: lower recall budget and keep `runtimeVectorOnlyRecall=true`.
 
----
+### FAQ
 
-## 10. 常见问题
+**Why split memory stores?**  
+To separate runtime recall from governance retention and avoid retrieval contamination.
 
-- **没有记忆注入**：查 `autoRecall`、memory slot、`dbPath`、嵌入 API。  
-- **双份自改进提醒**：若额外启用了 `bundled/.../hooks/openclaw` 虚拟文件注入，与插件 LanceDB 提醒会重复——择一，见 `bundled/self-improvement/INTEGRATION.md`。  
-- **Jina 401**：确认环境变量注入到网关进程。  
-- **治理与主库串了**：核对两处 `*dbPath` 必须不同目录。
+**Do session files still exist?**  
+Yes, primarily for archive/audit/rollback. Runtime recall should use vector stores.
 
----
-
-## 许可证
+### License
 
 MIT

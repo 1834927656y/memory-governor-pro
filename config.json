@@ -4,11 +4,11 @@
   "workspaceRoot": "workspace",
   "sessionsRoot": "agents/{AGENT_ID}/sessions",
   "openclawConfigPath": "openclaw.json",
-  "stateDir": "skills/memory-governor-pro/state/{AGENT_ID}",
+  "stateDir": "{SKILL_ROOT}/state/{AGENT_ID}",
   "archiveRoot": "agents/{AGENT_ID}/sessions/archive",
   "archiveRetentionDays": 30,
   "selfImprovingRoot": "workspace",
-  "preRefineSessionSnapshot": false,
+  "preRefineSessionSnapshot": true,
   "internalScheduler": {
     "enabled": true,
     "runAtLocalTime": "00:05",
@@ -19,7 +19,7 @@
     "maxDeferMs": 7200000,
     "catchUpOutsideRunWindow": true,
     "catchUpOnStartup": true,
-    "catchUpMaxDays": 7,
+    "catchUpMaxDays":365,
     "downtimeRecoveryMaxDays": 365,
     "lockStaleMs": 300000,
     "runGovernanceAfterSuccess": false,
@@ -48,6 +48,14 @@
     "topK": 3,
     "maxChars": 2800
   },
+  "injectionLayerBudget": {
+    "selfImprovement": 0.2,
+    "memory": 0.5,
+    "governance": 0.3
+  },
+  "runtimeVectorOnlyRecall": true,
+  "rotateOnAgentEnd": true,
+  "rotateOnAgentEndCooldownMs": 120000,
   "lancedb": {
     "dbPath": "memory/lancedb-governor/{AGENT_ID}",
     "tableName": "memories",

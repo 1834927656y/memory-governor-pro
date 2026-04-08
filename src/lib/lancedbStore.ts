@@ -217,10 +217,25 @@ export async function queryMemories(
 ) {
   const dbInfo = await tryOpenLance(cfg.dbPath, cfg.tableName);
   if (dbInfo.mode === "lancedb") {
-    const vector = pseudoEmbedding(queryText, cfg.embeddingDimensions);
-    const rs = await dbInfo.table.search(vector).limit(Math.max(topK * 8, 24)).toArray();
-    const normalized = rs.map((r: any) => normalizeGovernorRow(r));
-    return normalized.filter((r) => belongsToAgent(r, agentId)).slice(0, topK);
+    try {
+      const vector = pseudoEmbedding(queryText, cfg.embeddingDimensions);
+      const rs = await dbInfo.table.search(vector).limit(Math.max(topK * 8, 24)).toArray();
+      const normalized = rs.map((r: unknown) => normalizeGovernorRow(r));
+      return normalized
+        .filter((r: Record<string, unknown>) => belongsToAgent(r, agentId))
+        .slice(0, topK);
+    } catch {
+      // Some older or externally created governor tables may miss a compatible
+      // vector column. Fall back to lexical ranking over table rows.
+      const rows = await dbInfo.table.query().toArray();
+      return rows
+        .map((r: any) => normalizeGovernorRow(r))
+        .filter((r: any) => belongsToAgent(r, agentId))
+        .map((r: any) => ({ r, s: overlapScore(queryText, String(r.summary || "")) }))
+        .sort((a: any, b: any) => b.s - a.s)
+        .slice(0, topK)
+        .map((x: any) => x.r);
+    }
   }
   const file = path.join(cfg.dbPath, `${cfg.tableName}.jsonl`);
   if (!fs.existsSync(file)) return [];
@@ -234,5 +249,51 @@ export async function queryMemories(
     .sort((a: any, b: any) => b.s - a.s)
     .slice(0, topK)
     .map((x: any) => x.r);
+}
+
+function tokenizeLoose(text: string): Set<string> {
+  return new Set(
+    String(text || "")
+      .toLowerCase()
+      .split(/[\s,.;:!?，。；：！？()\[\]{}<>"'`/\\|+-]+/g)
+      .map((x) => x.trim())
+      .filter((x) => x.length >= 2),
+  );
+}
+
+function tokenOverlapCount(a: Set<string>, b: Set<string>): number {
+  if (!a.size || !b.size) return 0;
+  let n = 0;
+  for (const x of a) if (b.has(x)) n++;
+  return n;
+}
+
+/**
+ * Governance 严格检索：先做候选召回，再按词项重叠进行强过滤，避免全量会话记忆过度注入。
+ */
+export async function queryMemoriesStrict(
+  cfg: { dbPath: string; tableName: string; embeddingDimensions: number },
+  queryText: string,
+  topK = 2,
+  agentId = "main",
+  minOverlapTokens = 2,
+) {
+  const widened = Math.max(topK * 6, 24);
+  const rows = await queryMemories(cfg, queryText, widened, agentId);
+  const qTokens = tokenizeLoose(queryText);
+  if (!qTokens.size) return rows.slice(0, topK);
+  return rows
+    .map((r: Record<string, unknown>) => {
+      const s = String((r as any).summary || (r as any).text || "");
+      const overlap = tokenOverlapCount(qTokens, tokenizeLoose(s));
+      return { r, overlap };
+    })
+    .filter((x: { r: Record<string, unknown>; overlap: number }) => x.overlap >= minOverlapTokens)
+    .sort(
+      (a: { r: Record<string, unknown>; overlap: number }, b: { r: Record<string, unknown>; overlap: number }) =>
+        b.overlap - a.overlap,
+    )
+    .slice(0, topK)
+    .map((x: { r: Record<string, unknown>; overlap: number }) => x.r);
 }
 

@@ -1343,7 +1343,7 @@
     },
     "memoryCompaction.enabled": {
       "label": "Auto Compaction",
-      "help": "Automatically consolidate similar old memories at gateway startup. Also available on-demand via the memory_compact tool (requires enableManagementTools)."
+      "help": "Automatically consolidate similar old memories at gateway startup. On-demand semantic merge: memory_compact. Duplicate row archival: memory_dedupe (both require enableManagementTools)."
     },
     "memoryCompaction.minAgeDays": {
       "label": "Min Age (days)",

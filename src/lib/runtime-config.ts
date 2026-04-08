@@ -23,11 +23,12 @@ export interface ResolveRuntimeOptions {
 
 export function resolvePathTemplate(
   input: string,
-  ctx: { openclawHome: string; agentId: string },
+  ctx: { openclawHome: string; agentId: string; skillRoot?: string },
 ): string {
   const replaced = input
     .replaceAll("{OPENCLAW_HOME}", ctx.openclawHome)
-    .replaceAll("{AGENT_ID}", ctx.agentId);
+    .replaceAll("{AGENT_ID}", ctx.agentId)
+    .replaceAll("{SKILL_ROOT}", ctx.skillRoot ? path.resolve(ctx.skillRoot) : "");
   const expanded = expandHome(replaced);
   return path.isAbsolute(expanded)
     ? path.normalize(expanded)
@@ -105,7 +106,7 @@ export function resolveRuntimeConfig(cfg: Config, options: ResolveRuntimeOptions
     process.env.OPENCLAW_AGENT_ID?.trim() ||
     cfg.agentId ||
     "main";
-  const ctx = { openclawHome, agentId };
+  const ctx = { openclawHome, agentId, skillRoot: options.skillRoot };
 
   /** 仅在「未显式指定 agent」且能识别安装位点时，直接用识别到的工作区；否则按模板 + 最终 agentId 展开 */
   const useInstallWorkspace = !explicitAgentId && Boolean(installDetected);

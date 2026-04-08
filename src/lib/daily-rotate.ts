@@ -1,16 +1,24 @@
 /**
  * 每日会话精炼：按日历日（配置时区）处理「已完成」的对话日，
  * 调用 rotateDay 精炼入库存档并从 transcript jsonl 中剔除该日消息。
+ * 每轮管道结束：将会话目录收拢为恰好一个规范 `*.jsonl`（未精炼日期的行保留在唯一文件中），
+ * 并把 sessions.json 全部条目收敛到该文件路径及对应 sessionId。
  */
 
 import { spawnSync } from "node:child_process";
 import path from "node:path";
 import fs from "node:fs";
 import crypto from "node:crypto";
-import { aggregateByDate } from "./jsonlSessions.js";
+import {
+  aggregateByDate,
+  isOpenClawSessionArchiveTranscriptFileName,
+  listSessionFiles,
+  sessionTranscriptStem,
+} from "./jsonlSessions.js";
 import { ensureDir, readJson } from "./fsx.js";
 import { rotateDay } from "./nightly.js";
 import { resolveRuntimeConfig } from "./runtime-config.js";
+import { syncOpenClawSessionsJsonAfterRotation } from "./sessions-json-sync.js";
 import type { Config } from "../types.js";
 import type { Logger } from "./logger.js";
 
@@ -98,7 +106,8 @@ export async function listPendingRotationDateKeys(
   return pending;
 }
 
-function runOpenclawSessionsCleanup(openclawBin: string, openclawHome: string) {
+/** 供内部调度在「多 agent 同一 tick」末尾统一调用，避免重复执行 --all-agents 清理。 */
+export function runOpenclawSessionsCleanup(openclawBin: string, openclawHome: string) {
   const cfgPath = path.join(openclawHome, "openclaw.json");
   const r = spawnSync(
     openclawBin,
@@ -120,31 +129,44 @@ function runOpenclawSessionsCleanup(openclawBin: string, openclawHome: string) {
   };
 }
 
-function hasSessionMutation(results: unknown[]): boolean {
-  for (const item of results as Array<any>) {
-    const changes = Array.isArray(item?.changes) ? item.changes : [];
-    for (const c of changes) {
-      const action = typeof c?.action === "string" ? c.action : "";
-      if (
-        action === "deleted" ||
-        action === "migrated_retained_to_latest_session" ||
-        action.startsWith("rewritten")
-      ) {
-        return true;
-      }
-    }
-  }
-  return false;
+function appendTranscriptFragments(targetPath: string, sourcePath: string): void {
+  const text = fs.readFileSync(sourcePath, "utf8");
+  if (!text.trim()) return;
+  const normalized = text.endsWith("\n") ? text : `${text}\n`;
+  fs.appendFileSync(targetPath, normalized, "utf8");
 }
 
+/**
+ * 若唯一留存文件仍是 reset/deleted 归档文件名，迁移为规范 `{stem}.jsonl`，便于网关与 sessions.json 一致。
+ */
+function ensureCanonicalJsonlFilename(sessionsRoot: string, keeperPath: string): string {
+  const base = path.basename(keeperPath);
+  if (!isOpenClawSessionArchiveTranscriptFileName(base)) return keeperPath;
+  const stem = sessionTranscriptStem(keeperPath);
+  const target = path.join(sessionsRoot, `${stem}.jsonl`);
+  if (path.resolve(keeperPath) === path.resolve(target)) return keeperPath;
+  try {
+    if (fs.existsSync(target)) {
+      appendTranscriptFragments(target, keeperPath);
+      fs.unlinkSync(keeperPath);
+    } else {
+      fs.renameSync(keeperPath, target);
+    }
+  } catch {
+    return keeperPath;
+  }
+  return target;
+}
+
+/**
+ * 将 agents/.../sessions 下全部会话转录合并为**恰好一个**规范 `*.jsonl`：
+ * 未纳入本次日终精炼的行会 append 到 keeper；reset/deleted 归档内容一并并入后删除。
+ */
 function normalizeToSingleSessionFile(
   sessionsRoot: string,
 ): { keeperPath: string; mergedFrom: string[]; created: boolean } {
   ensureDir(sessionsRoot);
-  const files = fs
-    .readdirSync(sessionsRoot)
-    .filter((x) => x.endsWith(".jsonl"))
-    .map((x) => path.join(sessionsRoot, x));
+  const files = listSessionFiles(sessionsRoot);
 
   if (files.length === 0) {
     const keeperPath = path.join(sessionsRoot, `${crypto.randomUUID()}.jsonl`);
@@ -152,9 +174,17 @@ function normalizeToSingleSessionFile(
     return { keeperPath, mergedFrom: [], created: true };
   }
 
-  let keeperPath = files[0];
+  if (files.length === 1) {
+    const keeperPath = ensureCanonicalJsonlFilename(sessionsRoot, files[0]!);
+    return { keeperPath, mergedFrom: [], created: false };
+  }
+
+  const nonReset = files.filter((f) => !isOpenClawSessionArchiveTranscriptFileName(path.basename(f)));
+  const keeperPool = nonReset.length > 0 ? nonReset : files;
+
+  let keeperPath = keeperPool[0]!;
   let latestMtime = -1;
-  for (const f of files) {
+  for (const f of keeperPool) {
     try {
       const m = fs.statSync(f).mtimeMs;
       if (m > latestMtime) {
@@ -180,6 +210,8 @@ function normalizeToSingleSessionFile(
       /* keep best-effort; do not fail pipeline */
     }
   }
+
+  keeperPath = ensureCanonicalJsonlFilename(sessionsRoot, keeperPath);
   return { keeperPath, mergedFrom, created: false };
 }
 
@@ -209,6 +241,10 @@ export interface DailyRotateOptions {
   };
   /** 跳过 rotateSafety（内部调度推迟过久或 CLI） */
   forceIgnoreRotateSafety?: boolean;
+  /** 为 true 时不在管道内调用 openclaw sessions cleanup（由调用方在 tick 末统一执行） */
+  skipOpenclawCleanup?: boolean;
+  /** 为 true 时允许处理 today（用于任务级精炼），默认 false */
+  includeToday?: boolean;
 }
 
 export async function runDailyRotatePipeline(
@@ -278,7 +314,7 @@ export async function runDailyRotatePipeline(
     );
 
     for (const dateKey of dateKeys) {
-      if (dateKey >= todayYmd) {
+      if (!options.includeToday && dateKey >= todayYmd) {
         logger.warn("daily-rotate.skip_future_or_today", {
           dateKey,
           todayYmd,
@@ -316,21 +352,40 @@ export async function runDailyRotatePipeline(
     }
 
     let openclawCleanup: { ok: boolean; stderr: string } | undefined;
-    if (options.openclawCleanup && results.some((r: any) => r?.status === "ok")) {
+    if (
+      options.openclawCleanup &&
+      !options.skipOpenclawCleanup &&
+      results.some((r: any) => r?.status === "ok")
+    ) {
       const home = path.dirname(config.openclawConfigPath);
       const cr = runOpenclawSessionsCleanup(options.openclawBin, home);
       openclawCleanup = { ok: cr.ok, stderr: cr.stderr.slice(0, 2000) };
     }
-    let ensuredSingleSession:
-      | { keeperPath: string; mergedFrom: string[]; created: boolean }
-      | undefined;
-    if (hasSessionMutation(results)) {
-      ensuredSingleSession = normalizeToSingleSessionFile(config.sessionsRoot);
-      logger.info("daily-rotate.normalize_single_session", {
-        keeperPath: ensuredSingleSession.keeperPath,
-        mergedFrom: ensuredSingleSession.mergedFrom,
-        created: ensuredSingleSession.created,
+    /** 每轮管道结束：目录内仅保留一个 `.jsonl`（精炼已剥离的日不再出现在文件中，其余行合并到 keeper） */
+    const ensuredSingleSession = normalizeToSingleSessionFile(config.sessionsRoot);
+    logger.info("daily-rotate.normalize_single_session", {
+      keeperPath: ensuredSingleSession.keeperPath,
+      mergedFrom: ensuredSingleSession.mergedFrom,
+      created: ensuredSingleSession.created,
+    });
+
+    const allRotationChanges = results
+      .filter((r: any) => r?.status === "ok" && Array.isArray(r?.changes))
+      .flatMap((r: any) => r.changes as Array<{ filePath: string; action: string; targetSessionFile?: string }>);
+    const sessionsJsonPath = path.join(config.sessionsRoot, "sessions.json");
+    if (fs.existsSync(sessionsJsonPath)) {
+      const syncRs = syncOpenClawSessionsJsonAfterRotation({
+        sessionsRoot: config.sessionsRoot,
+        changes: allRotationChanges,
+        normalize: ensuredSingleSession,
+        forceCanonicalSessionFile: ensuredSingleSession.keeperPath,
       });
+      if (syncRs.touched) {
+        logger.info("daily-rotate.sessions_json_synced", {
+          updatedEntries: syncRs.updated,
+          path: syncRs.sessionsJsonPath,
+        });
+      }
     }
 
     batchResults.push({

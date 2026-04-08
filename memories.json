@@ -1,0 +1,17 @@
+{
+  "version": "1.0",
+  "exportedAt": "2026-04-07T10:05:37.517Z",
+  "count": 1,
+  "filters": {},
+  "memories": [
+    {
+      "id": "f2d4a9e8a03f207fa49fade0",
+      "text": "## Self-Improvement Reminder\n\nAfter completing tasks, evaluate if any learnings should be captured:\n\n**Log when:**\n- User corrects you -> .learnings/LEARNINGS.md\n- Command/operation fails -> .learnings/ERRORS.md\n- You discover your knowledge was wrong -> .learnings/LEARNINGS.md\n- You find a better approach -> .learnings/LEARNINGS.md\n\n**Promote when pattern is proven:**\n- Behavioral patterns -> SOUL.md\n- Workflow improvements -> AGENTS.md\n- Tool gotchas -> TOOLS.md\n\nKeep entries simple: date, title, what happened, what to do differently.",
+      "category": "preference",
+      "scope": "agent:xunc2",
+      "importance": 0.65,
+      "timestamp": 1775555632762,
+      "metadata": "{\"l0_abstract\":\"## Self-Improvement Reminder\\n\\nAfter completing tasks, evaluate if any learnings should be captured:\\n\\n**Log when:**\\n- User corrects you -> .learnings/LEARNINGS.md\\n- Command/operation fails -> .learnings/ERRORS.md\\n- You discover your knowledge was wrong -> .learnings/LEARNINGS.md\\n- You find a better approach -> .learnings/LEARNINGS.md\\n\\n**Promote when pattern is proven:**\\n- Behavioral patterns -> SOUL.md\\n- Workflow improvements -> AGENTS.md\\n- Tool gotchas -> TOOLS.md\\n\\nKeep entri\",\"l1_overview\":\"## Self-Improvement Reminder\\n\\nAfter completing tasks, evaluate if any learnings should be captured:\\n\\n**Log when:**\\n- User corrects you -> .learnings/LEARNINGS.md\\n- Command/operation fails -> .learnings/ERRORS.md\\n- You discover your knowledge was wrong -> .learnings/LEARNINGS.md\\n- You find a better approach -> .learnings/LEARNINGS.md\\n\\n**Promote when pattern is proven:**\\n- Behavioral patterns -> SOUL.md\\n- Workflow improvements -> AGENTS.md\\n- Tool gotchas -> TOOLS.md\\n\\nKeep entries simple: date, title, what happened, what to do differently.\",\"l2_content\":\"## Self-Improvement Reminder\\n\\nAfter completing tasks, evaluate if any learnings should be captured:\\n\\n**Log when:**\\n- User corrects you -> .learnings/LEARNINGS.md\\n- Command/operation fails -> .learnings/ERRORS.md\\n- You discover your knowledge was wrong -> .learnings/LEARNINGS.md\\n- You find a better approach -> .learnings/LEARNINGS.md\\n\\n**Promote when pattern is proven:**\\n- Behavioral patterns -> SOUL.md\\n- Workflow improvements -> AGENTS.md\\n- Tool gotchas -> TOOLS.md\\n\\nKeep entries simple: date, title, what happened, what to do differently.\",\"memory_category\":\"preferences\",\"tier\":\"working\",\"access_count\":0,\"confidence\":0.7,\"last_accessed_at\":1775555632762,\"valid_from\":1775555632762,\"fact_key\":\"preferences:## self-improvement reminder after completing tasks, evaluate if any learnings should be captured: **log when:** - user corrects you -> .learnings/learnings.md - command/operation fails -> .learnings/errors.md - you discover your knowledge was wrong -> .learnings/learnings.md - you find a better approach -> .learnings/learnings.md **promote when pattern is proven:** - behavioral patterns -> soul.md - workflow improvements -> agents.md - tool gotchas -> tools.md keep entries simple: date, title, what happened, what to do differently\",\"state\":\"confirmed\",\"source\":\"manual\",\"memory_layer\":\"working\",\"injected_count\":0,\"bad_recall_count\":0,\"suppressed_until_turn\":0,\"opencl_reminder_kind\":\"openclaw_self_improvement_reminder_v1\"}"
+    }
+  ]
+}

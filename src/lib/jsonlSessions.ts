@@ -42,9 +42,53 @@ function resolveRecordDateKey(rec: any, fileFallbackDateKey: string): { dateKey:
   return { dateKey: fileFallbackDateKey };
 }
 
+/**
+ * 活跃会话转录 `*.jsonl`，以及 OpenClaw 留档：
+ * - `{sessionId}.jsonl.reset.{timestamp}`
+ * - `{sessionId}.jsonl.deleted.{timestamp}`
+ * （上述文件名通常不以单独的 `.jsonl` 结尾）。
+ */
+export function isSessionTranscriptFileName(fileName: string): boolean {
+  if (!fileName || fileName === "sessions.json") return false;
+  if (fileName.includes(".jsonl.reset.")) return true;
+  if (fileName.includes(".jsonl.deleted.")) return true;
+  return fileName.endsWith(".jsonl");
+}
+
+export function isOpenClawResetTranscriptFileName(fileName: string): boolean {
+  return fileName.includes(".jsonl.reset.");
+}
+
+export function isOpenClawDeletedTranscriptFileName(fileName: string): boolean {
+  return fileName.includes(".jsonl.deleted.");
+}
+
+/** reset / deleted 等非规范 `uuid.jsonl`，合并保留行时优先写入规范活跃 jsonl */
+export function isOpenClawSessionArchiveTranscriptFileName(fileName: string): boolean {
+  return isOpenClawResetTranscriptFileName(fileName) || isOpenClawDeletedTranscriptFileName(fileName);
+}
+
+/**
+ * 与网关 session 对齐的 stem：`uuid.jsonl` → `uuid`；
+ * reset / deleted 归档取文件名中 `uuid` 段。
+ */
+export function sessionTranscriptStem(filePath: string): string {
+  const base = path.basename(filePath);
+  if (base.includes(".jsonl.deleted.")) {
+    return base.slice(0, base.indexOf(".jsonl.deleted."));
+  }
+  if (base.includes(".jsonl.reset.")) {
+    return base.slice(0, base.indexOf(".jsonl.reset."));
+  }
+  return path.basename(filePath, ".jsonl");
+}
+
 export function listSessionFiles(sessionsRoot: string): string[] {
   if (!fs.existsSync(sessionsRoot)) return [];
-  return fs.readdirSync(sessionsRoot).filter((f) => f.endsWith(".jsonl")).map((f) => path.join(sessionsRoot, f));
+  return fs
+    .readdirSync(sessionsRoot)
+    .filter((f) => isSessionTranscriptFileName(f))
+    .map((f) => path.join(sessionsRoot, f));
 }
 
 export async function aggregateByDate(sessionsRoot: string, targetDateKey?: string) {
@@ -68,7 +112,7 @@ export async function aggregateByDate(sessionsRoot: string, targetDateKey?: stri
       const b = buckets.get(dateKey)!;
       b.messages.push({ role: rec?.message?.role || "", text, ts: tsIso || `${dateKey}T00:00:00.000Z` });
       b.sourceFiles.add(filePath);
-      b.sourceSessionIds.add(path.basename(filePath, ".jsonl"));
+      b.sourceSessionIds.add(sessionTranscriptStem(filePath));
     }
   }
   return Array.from(buckets.values()).map((b) => ({ ...b, sourceFiles: Array.from(b.sourceFiles), sourceSessionIds: Array.from(b.sourceSessionIds) }));

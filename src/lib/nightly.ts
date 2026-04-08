@@ -1,6 +1,13 @@
 import fs from "node:fs";
 import path from "node:path";
-import { aggregateByDate, listSessionFiles, rewriteRemoveDateFromFile, stableMemoryId } from "./jsonlSessions";
+import {
+  aggregateByDate,
+  isOpenClawSessionArchiveTranscriptFileName,
+  listSessionFiles,
+  rewriteRemoveDateFromFile,
+  sessionTranscriptStem,
+  stableMemoryId,
+} from "./jsonlSessions";
 import { refineBucket } from "./refiner";
 import { collectSelfImprovingRecords } from "./selfImprovingIngest";
 import { upsertMemories } from "./lancedbStore";
@@ -27,10 +34,15 @@ function pickLatestSessionFile(
   const candidates = listSessionFiles(sessionsRoot).filter(
     (p) => path.resolve(p) !== path.resolve(excludeFilePath),
   );
-  if (candidates.length === 0) return undefined;
+  /** 合并保留行时优先写入当前活跃 `*.jsonl`，避免误合并进 reset/deleted 归档 */
+  const nonReset = candidates.filter(
+    (p) => !isOpenClawSessionArchiveTranscriptFileName(path.basename(p)),
+  );
+  const pool = nonReset.length > 0 ? nonReset : candidates;
+  if (pool.length === 0) return undefined;
   let latest: string | undefined;
   let latestMtime = -1;
-  for (const p of candidates) {
+  for (const p of pool) {
     try {
       const st = fs.statSync(p);
       if (st.mtimeMs > latestMtime) {
@@ -63,6 +75,7 @@ export async function rotateDay(
     forceIgnoreSafety?: boolean
   } = {},
 ) {
+  const batchId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   const aggregated = await aggregateByDate(config.sessionsRoot, dateKey);
   const bucket = aggregated.find((x: any) => x.dateKey === dateKey);
   if (!bucket) return { status: "no_data", dateKey };
@@ -70,7 +83,7 @@ export async function rotateDay(
   if (opts.safety && !opts.forceIgnoreSafety) {
     const { quietMsAfterSessionWrite, isSessionStemBusy } = opts.safety;
     for (const filePath of bucket.sourceFiles as string[]) {
-      const stem = path.basename(filePath, ".jsonl");
+      const stem = sessionTranscriptStem(filePath);
       if (isSessionStemBusy(stem)) {
         logger.warn("nightly.deferred_session_busy", { dateKey, sessionStem: stem });
         return { status: "deferred", dateKey, reason: "session_busy", sessionStem: stem };
@@ -117,10 +130,10 @@ export async function rotateDay(
       if (config.rotation.allowPermanentDelete || opts.allowDelete) {
         fs.unlinkSync(filePath);
         fs.unlinkSync(rs.tmpPath);
-        changes.push({ filePath, action: "deleted", archived: rs.archived });
+        changes.push({ filePath, action: "deleted", archived: rs.archived, batchId });
       } else {
         fs.renameSync(rs.tmpPath, filePath);
-        changes.push({ filePath, action: "rewritten_no_delete", archived: rs.archived });
+        changes.push({ filePath, action: "rewritten_no_delete", archived: rs.archived, batchId });
       }
     } else {
       if (config.rotation.mergeRetainedIntoLatestSession) {
@@ -135,6 +148,7 @@ export async function rotateDay(
             retained: rs.retained,
             archived: rs.archived,
             targetSessionFile: latest,
+            batchId,
           });
         } else {
           fs.renameSync(rs.tmpPath, filePath);
@@ -143,17 +157,23 @@ export async function rotateDay(
             action: "rewritten_no_latest_session",
             retained: rs.retained,
             archived: rs.archived,
+            batchId,
           });
         }
       } else {
         fs.renameSync(rs.tmpPath, filePath);
-        changes.push({ filePath, action: "rewritten", retained: rs.retained, archived: rs.archived });
+        changes.push({ filePath, action: "rewritten", retained: rs.retained, archived: rs.archived, batchId });
       }
     }
   }
   const st = readJson<{ rotatedDays: Record<string, any> }>(path.join(config.stateDir, "rotation-state.json"), { rotatedDays: {} });
   st.rotatedDays[dateKey] = {
     at: new Date().toISOString(),
+    batchId,
+    archivedCount: changes.reduce(
+      (sum, c) => sum + (Array.isArray(c?.archived) ? c.archived.length : 0),
+      0,
+    ),
     changes,
     ...(preRefineSnapshotDir ? { preRefineSnapshotDir } : {}),
   };

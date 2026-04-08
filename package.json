@@ -38,7 +38,8 @@
     ]
   },
   "scripts": {
-    "governor:daily-rotate": "node --import jiti/register src/index.ts daily-rotate --all-agents",
+    "governor:daily-rotate": "node --import jiti/register src/index.ts daily-rotate",
+    "governor:daily-rotate:all-agents": "node --import jiti/register src/index.ts daily-rotate --all-agents",
     "governor:nightly": "node --import jiti/register src/index.ts nightly",
     "governor:bootstrap": "node --import jiti/register src/index.ts bootstrap --days 90 --allowDelete",
     "governor:flush": "node --import jiti/register src/index.ts flush --percent 70",
@@ -48,10 +49,11 @@
     "governor:audit-clear-rotation": "node --import jiti/register src/index.ts audit-clear-rotation",
     "governor:audit-purge-memories": "node --import jiti/register src/index.ts audit-purge-memories",
     "governor:archive-prune": "node --import jiti/register src/index.ts archive-prune",
+    "governor:verify-layered-injection": "node scripts/verify-layered-injection.mjs",
+    "governor:sync-plugin-load-paths": "node scripts/sync-plugin-load-paths.mjs",
+    "governor:plugin:install": "node scripts/manage-plugin-install.mjs install",
+    "governor:plugin:uninstall": "node scripts/manage-plugin-install.mjs uninstall",
     "governor:vendor:init-self-improving": "node --import jiti/register src/index.ts vendor:init-self-improving",
-    "test": "node test/embedder-error-hints.test.mjs && node test/cjk-recursion-regression.test.mjs && node test/migrate-legacy-schema.test.mjs && node --test test/config-session-strategy-migration.test.mjs && node --test test/scope-access-undefined.test.mjs && node --test test/reflection-bypass-hook.test.mjs && node --test test/smart-extractor-scope-filter.test.mjs && node --test test/store-empty-scope-filter.test.mjs && node --test test/recall-text-cleanup.test.mjs && node test/update-consistency-lancedb.test.mjs && node --test test/strip-envelope-metadata.test.mjs && node test/cli-smoke.mjs && node test/functional-e2e.mjs && node test/retriever-rerank-regression.mjs && node test/smart-memory-lifecycle.mjs && node test/smart-extractor-branches.mjs && node test/plugin-manifest-regression.mjs && node --test test/session-summary-before-reset.test.mjs && node --test test/sync-plugin-version.test.mjs && node test/smart-metadata-v2.mjs && node test/vector-search-cosine.test.mjs && node test/context-support-e2e.mjs && node test/temporal-facts.test.mjs && node test/memory-update-supersede.test.mjs && node test/memory-upgrader-diagnostics.test.mjs && node --test test/llm-api-key-client.test.mjs && node --test test/llm-oauth-client.test.mjs && node --test test/cli-oauth-login.test.mjs && node --test test/workflow-fork-guards.test.mjs && node --test test/clawteam-scope.test.mjs && node --test test/cross-process-lock.test.mjs && node --test test/preference-slots.test.mjs",
-    "test:skill-functional": "node --import jiti/register scripts/skill-functional-test.ts",
-    "test:openclaw-host": "node test/openclaw-host-functional.mjs",
     "version": "node scripts/sync-plugin-version.mjs openclaw.plugin.json package.json && git add openclaw.plugin.json"
   },
   "devDependencies": {
