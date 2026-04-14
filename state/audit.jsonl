@@ -1,3 +1,0 @@
-{"ts":"2026-03-31T07:38:52.744Z","level":"info","event":"job.start","jobId":"nightly-1774942732744","kind":"nightly","dateKey":"2026-03-31","opts":{"date":"2026-03-31","skipDelete":true}}
-{"ts":"2026-03-31T07:38:52.776Z","level":"info","event":"nightly.no_data","jobId":"nightly-1774942732744","dateKey":"2026-03-31"}
-{"ts":"2026-03-31T07:38:52.777Z","level":"info","event":"job.finish","jobId":"nightly-1774942732744","kind":"nightly","dateKey":"2026-03-31","rs":{"status":"no_data","dateKey":"2026-03-31"}}

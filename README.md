@@ -16,7 +16,7 @@
 
 ### 目录
 
-- [核心功能](#核心功能)
+- [核心功能](#核心功能通俗版)
 - [项目来源与借鉴](#项目来源与借鉴)
 - [设计思路](#设计思路)
 - [快速开始](#快速开始)
@@ -31,7 +31,7 @@
 
 ### 快速导航（优先阅读）
 
-1. **功能介绍**：先看 [核心功能](#核心功能)  
+1. **功能介绍**：先看 [核心功能（通俗版）](#核心功能通俗版)  
 2. **借鉴项目**：再看 [项目来源与借鉴](#项目来源与借鉴)  
 3. **实现思路**：然后看 [设计思路](#设计思路)  
 4. **如何使用**：最后看 [快速开始](#快速开始) 和 [完整配置示例](#完整配置示例)
@@ -51,13 +51,14 @@
    用最短上下文放最关键信息。
 
 3. **让长任务不中断思路**  
-   当上下文接近上限或任务结束时，触发精炼沉淀进展，后续继续读取，降低上下文压缩导致的“任务断片”。
+   当上下文接近压缩/预算上限时触发**阈值全量剥皮**（入库 → 归档副本 → 腾空会话 → 生成注入包）；精炼与「每轮聊天结束」**解耦**，日常对话可一直保留在会话文件中直到阈值触发。  
+   触发后会记录中断状态（会话/指令来源/最近任务意图），在精炼完成后的下一次 prompt 构建自动注入恢复块，再继续原任务目标。
 
 4. **让行为可审计、可回滚**  
-   精炼、归档、轮转全程落台账；会话文件归档保留；可按日期/批次恢复，不是黑盒。
+   关键步骤写入 `state/<agent>/audit.jsonl`；全量剥皮前的会话整文件副本在 `agents/<agent>/sessions/archive/governor-full/<时间戳>/`。（CLI `nightly` / `daily-rotate` 路径不再写入 `state/.../snapshots/<日>.json`。）
 
-5. **让会话文件更干净**  
-   精炼后 `sessions` 目录收敛为单活动 `jsonl`（仅保留未精炼增量），历史进入归档。
+5. **让会话目录在剥皮后极简**  
+   **首装**与**阈值**成功后：`sessions` 下仅保留**一个空的**活跃 `*.jsonl`，`sessions.json` 中所有条目会**强制对齐**到该文件。
 
 一句话：**用更短上下文，保留更完整有效记忆，并把长周期稳定性问题变成可治理、可追踪的工程能力。**
 
@@ -86,12 +87,12 @@
 - `memory-lancedb-pro`：中等（保持原召回策略）
 - `governance`：最严格（高约束、低配额）
 
-#### 3) 生命周期治理面
+#### 3) 生命周期治理面（Governor）
 
-- 每任务结束可触发精炼  
-- 日终与初始化回填兜底  
-- 阈值触发用于上下文临界保护  
-- 所有关键操作写审计台账，可回滚
+- **首次安装**：根据 `state/<agent>/first-install-bootstrap.json` 判断是否执行；对当前全部会话转录**按日历桶精炼入治理向量库**，再整文件复制到 `archive/governor-full/<runId>/`，删除原转录并生成**唯一空 jsonl**，同步 `sessions.json`。可选 `internalScheduler.openclawCleanup` 在收尾执行 `openclaw sessions cleanup`。  
+- **阈值精炼**：在 `before_prompt_build` 与定时扫描上，当用量达到 `contextFlush` 配置（提前量可调）时，执行同一套**全量剥皮**，成功后按现有逻辑 `buildInjectionPack`（`context-pack.md`）。精炼成功后会写入 `state/<agent>/context-flush-resume.json`，并在后续构建时注入恢复状态。**不再**在「每轮任务结束」自动剥皮。  
+- **日终按日轮转**：已从新主链路移除；网关内调度仅保留**首装**与**归档 TTL**（删除 `archive` 下过期 **YYYY-MM-DD** 形目录）。手工 `npm run governor:daily-rotate` 等仍可作为抢险工具。  
+- 操作痕迹以 **`audit.jsonl`** 为主，不再依赖 `snapshots/<日>.json` 作为 Governor 主路径产物。
 
 ### 快速开始
 
@@ -122,6 +123,22 @@ $env:OPENCLAW_HOME="$env:USERPROFILE\.openclaw"
 $env:JINA_API_KEY="your_key"
 ```
 
+#### 2.5) OpenClaw 网关：Web 聊天记录字符预算（推荐）
+
+本插件**不修改** OpenClaw 本体；若使用 **OpenClaw Control 网页聊天**，网关会通过 `chat.history` 下发历史，并对单条文本按 `gateway.webchat.chatHistoryMaxChars` 截断（未配置时默认较小）。  
+当 user 消息前有较长的系统/自改进等前缀时，**真实指令在末尾**，截断可能导致控制台里「刷新后看不到刚发的短句」，而磁盘上的 `*.jsonl` 仍完整。
+
+可在 **`openclaw.json` 的 `gateway` 下**增加（数值可按机器与官方 schema 上限调整）：
+
+```json
+"webchat": {
+  "chatHistoryMaxChars": 200000
+}
+```
+
+保存后执行 `openclaw config validate` 与 `openclaw gateway restart`。  
+**说明**：这是 OpenClaw 官方配置项，属于部署侧建议，不是插件对核心的补丁；若需「超长 user 始终保留尾部」等行为，只能依赖 **上游 OpenClaw 版本演进** 或自行 fork，无法仅靠本 skill 源码替代网关实现。
+
 #### 3) 安装 skill 到 OpenClaw
 
 ```bash
@@ -141,6 +158,7 @@ openclaw plugins info memory-lancedb-pro
 
 ```bash
 npm run governor:verify-layered-injection
+npm run governor:test-full-strip
 ```
 
 ### 项目简介
@@ -163,7 +181,7 @@ npm run governor:verify-layered-injection
 
 ### 完整配置示例
 
-> 以下示例展示常用生产配置（含三层注入预算、任务结束精炼、严格治理检索）。
+> 以下示例展示常用生产配置（含三层注入预算、内部调度首装、阈值上下文卸载）。`rotateOnAgentEnd` 已废弃（插件忽略）。
 
 ```json
 {
@@ -211,8 +229,6 @@ npm run governor:verify-layered-injection
           "enableManagementTools": true,
           "governor": {
             "enabledAgents": ["main", "xunc1"],
-            "rotateOnAgentEnd": true,
-            "rotateOnAgentEndCooldownMs": 120000,
             "runtimeVectorOnlyRecall": true,
             "injectionLayerBudget": {
               "selfImprovement": 0.2,
@@ -221,9 +237,9 @@ npm run governor:verify-layered-injection
             },
             "internalScheduler": {
               "enabled": true,
-              "runAtLocalTime": "00:05",
-              "catchUpOnStartup": true,
-              "firstInstallBackfillEnabled": true
+              "tickIntervalMs": 600000,
+              "firstInstallBackfillEnabled": true,
+              "openclawCleanup": false
             }
           }
         }
@@ -271,13 +287,16 @@ npm run governor:verify-layered-injection
 
 | 配置 | 说明 | 建议 |
 |---|---|---|
-| `governor.enabledAgents` | 启用治理的 agent 列表 | 明确列出 |
-| `rotateOnAgentEnd` | 每任务结束触发精炼 | `true` |
-| `rotateOnAgentEndCooldownMs` | 任务结束精炼冷却 | 120000 |
+| `governor.enabledAgents` | 启用管家（首装 + 阈值作用域）的 agent；空数组则内部调度不跑首装 | 明确列出 |
 | `runtimeVectorOnlyRecall` | 运行时只读向量库，不回读会话文件 | `true` |
 | `injectionLayerBudget` | 三层注入预算（SI/Memory/Governance） | 0.2/0.5/0.3 |
-| `internalScheduler.enabled` | 内建调度开关 | `true` |
-| `firstInstallBackfillEnabled` | 首装回填 | `true` |
+| `internalScheduler.enabled` | 内建调度（首装一次尝试 + 归档 TTL） | `true` |
+| `internalScheduler.tickIntervalMs` | 心跳间隔；日终轮转已移除，可适当拉大（如 10 分钟） | 60000+ |
+| `internalScheduler.firstInstallBackfillEnabled` | 是否启用首装全量剥皮 | `true` |
+| `internalScheduler.openclawCleanup` | 首装成功后是否执行 `openclaw sessions cleanup` | 按需 |
+| `contextFlush.*` | 阈值触发线、轮询间隔、`query`（注入包检索主题）等 | 见 `config.json` |
+| ~~`rotateOnAgentEnd`~~ | **已废弃**（插件不再注册任务结束剥皮） | 可删除 |
+| `firstInstallBackfillMaxDays` | 历史仅保留兼容字段；新首装为**全量**会话剥皮，不按「最多历史日」截断 | — |
 
 #### E. 路径隔离（非常重要）
 
@@ -285,7 +304,7 @@ npm run governor:verify-layered-injection
 |---|---|---|
 | 主记忆库 | `plugins.entries.memory-lancedb-pro.config.dbPath` | 在线召回主来源 |
 | 治理记忆库 | `config.json -> lancedb.dbPath` | 治理专用，严禁复用主库 |
-| 会话归档 | `agents/<agent>/sessions/archive/` | 审计与回滚使用 |
+| 会话归档 | `agents/<agent>/sessions/archive/` | 旧版按日归档；**全量剥皮**副本在 `archive/governor-full/<时间戳>/` |
 
 ### 常用命令
 
@@ -311,6 +330,7 @@ npm run governor:audit-inspect
 npm run governor:audit-restore
 npm run governor:audit-clear-rotation
 npm run governor:audit-purge-memories
+npm run governor:rollback-first-install
 npm run governor:archive-prune
 npm run governor:verify-layered-injection
 ```
@@ -329,9 +349,20 @@ npm run governor:verify-layered-injection
 A: 主库服务在线召回，治理库服务精炼审计与长期留存，分离后稳定性更高。  
 
 **Q2: 会话文件还会保留吗？**  
-A: 会保留，但以归档为主；运行时注入只走向量库。  
+A: **运行中**原文在 `sessions/*.jsonl`；首装或阈值剥皮后，目录里只留**空**的活跃文件，原文在 `archive/governor-full/<时间戳>/`；运行时注入仍以向量库为主（配合 `context-pack` 等）。
 
-**Q3: 能否按 agent 精细化配置？**  
+**Q3: 如何回滚「首次安装自动回填」？**  
+A: 在 skill 根目录执行 `npm run governor:rollback-first-install`。`rotatedDateKeysAsc` 仍写在 `first-install-bootstrap.json`。新版主链路以 **`archive/governor-full/`** 与 **`audit.jsonl`** 为主要人工依据；若回滚流程仍引用 `snapshots/<日>.json` 而未被 CLI 生成，需结合归档副本处理。**建议先 `--dry-run`**；多 agent 使用 `--all-governor-agents`；见子命令 `--help`。
+
+示例（在 `memory-governor-pro` 目录下）：
+
+```bash
+npm run governor:rollback-first-install -- --agent main --dry-run
+npm run governor:rollback-first-install -- --all-governor-agents
+npm run governor:rollback-first-install -- --agent main --dates 2025-03-01,2025-03-02
+```
+
+**Q4: 能否按 agent 精细化配置？**  
 A: 可以，通过 `enabledAgents` 和 agent override 文件实现。  
 
 ### 许可证
@@ -391,8 +422,10 @@ This repository is not a 1:1 mirror of upstream projects. The code and docs here
   - permissive self-improvement rule hits
   - unchanged memory-lancedb-pro recall
   - strict governance retrieval
-- Task-end rotation, threshold-triggered flush, and bootstrap backfill
-- Auditable archive + rollback-oriented state records
+- First-install **full strip** (ingest → `archive/governor-full/<runId>/` → single empty jsonl → `sessions.json` sync)
+- **Threshold** full strip on context pressure, then `buildInjectionPack` (same hook as before)
+- No nightly day-by-day rotation in the gateway scheduler (TTL + first-install only); CLI rotate remains for emergencies
+- `audit.jsonl` as the primary Governor audit trail (CLI `nightly` no longer writes `state/.../snapshots/<day>.json`)
 
 ### Design Principles
 
@@ -401,7 +434,7 @@ This repository is not a 1:1 mirror of upstream projects. The code and docs here
 2. **Layered injection**
    - strict budgeted orchestration across memory sources
 3. **Audit-first governance**
-   - every rotation/merge/archive action is traceable and recoverable
+   - full-strip runs append to `audit.jsonl`; session copies live under `governor-full` archives
 4. **Context efficiency**
    - shortest practical prompt context with maximal useful recall
 
@@ -446,6 +479,7 @@ Verify layered setup:
 
 ```bash
 npm run governor:verify-layered-injection
+npm run governor:test-full-strip
 ```
 
 ### Full Configuration Example
@@ -461,13 +495,17 @@ npm run governor:verify-layered-injection
           "autoRecall": true,
           "retrieval": { "mode": "hybrid" },
           "governor": {
-            "rotateOnAgentEnd": true,
-            "rotateOnAgentEndCooldownMs": 120000,
+            "enabledAgents": ["main"],
             "runtimeVectorOnlyRecall": true,
             "injectionLayerBudget": {
               "selfImprovement": 0.2,
               "memory": 0.5,
               "governance": 0.3
+            },
+            "internalScheduler": {
+              "enabled": true,
+              "tickIntervalMs": 600000,
+              "firstInstallBackfillEnabled": true
             }
           }
         }
@@ -481,10 +519,12 @@ npm run governor:verify-layered-injection
 
 Key recommendations:
 
-- `governor.rotateOnAgentEnd = true`
-- `governor.rotateOnAgentEndCooldownMs = 120000`
+- `governor.enabledAgents` — non-empty list for first-install + threshold scope
 - `governor.runtimeVectorOnlyRecall = true`
 - `governor.injectionLayerBudget = { selfImprovement: 0.2, memory: 0.5, governance: 0.3 }`
+- `governor.internalScheduler` — gateway heartbeat: first-install + archive TTL only
+- `contextFlush.*` — threshold line, polling, injection `query`
+- `rotateOnAgentEnd` — **removed** (ignored by the plugin)
 
 ### Commands
 
@@ -498,8 +538,10 @@ npm run governor:audit-inspect
 npm run governor:audit-restore
 npm run governor:audit-clear-rotation
 npm run governor:audit-purge-memories
+npm run governor:rollback-first-install
 npm run governor:archive-prune
 npm run governor:verify-layered-injection
+npm run governor:test-full-strip
 ```
 
 ### Operations and Troubleshooting
@@ -515,7 +557,16 @@ npm run governor:verify-layered-injection
 To separate runtime recall from governance retention and avoid retrieval contamination.
 
 **Do session files still exist?**  
-Yes, primarily for archive/audit/rollback. Runtime recall should use vector stores.
+While chatting, transcripts live under `sessions/*.jsonl`. After a strip, only one **empty** active jsonl remains; originals are copied to `archive/governor-full/<timestamp>/`.
+
+**How to roll back first-install backfill?**  
+Run `npm run governor:rollback-first-install` (`rollback-first-install-backfill`). `rotatedDateKeysAsc` is stored in `first-install-bootstrap.json`. The newest pipeline uses **`governor-full` archives** and **`audit.jsonl` as evidence**; if rollback still expects `snapshots/<date>.json` from CLI `nightly`, that file may no longer be generated—combine with archive recovery. Use `--dry-run` first; `--all-governor-agents` matches `governor.enabledAgents`; see `--help` for cleanup flags.
+
+```bash
+npm run governor:rollback-first-install -- --agent main --dry-run
+npm run governor:rollback-first-install -- --all-governor-agents
+npm run governor:rollback-first-install -- --agent main --dates 2025-03-01,2025-03-02
+```
 
 ### License
 

@@ -245,6 +245,10 @@ export interface DailyRotateOptions {
   skipOpenclawCleanup?: boolean;
   /** 为 true 时允许处理 today（用于任务级精炼），默认 false */
   includeToday?: boolean;
+  /**
+   * 为 true 时整轮管道只做向量/snapshots  ingest，不改写会话文件、不 normalize、不同步 sessions.json。
+   */
+  ingestOnly?: boolean;
 }
 
 export async function runDailyRotatePipeline(
@@ -347,6 +351,7 @@ export async function runDailyRotatePipeline(
         allowDelete: options.allowDelete,
         safety: options.rotateSafety,
         forceIgnoreSafety: options.forceIgnoreRotateSafety === true,
+        ingestOnly: options.ingestOnly === true,
       });
       results.push(rs);
     }
@@ -361,30 +366,36 @@ export async function runDailyRotatePipeline(
       const cr = runOpenclawSessionsCleanup(options.openclawBin, home);
       openclawCleanup = { ok: cr.ok, stderr: cr.stderr.slice(0, 2000) };
     }
-    /** 每轮管道结束：目录内仅保留一个 `.jsonl`（精炼已剥离的日不再出现在文件中，其余行合并到 keeper） */
-    const ensuredSingleSession = normalizeToSingleSessionFile(config.sessionsRoot);
-    logger.info("daily-rotate.normalize_single_session", {
-      keeperPath: ensuredSingleSession.keeperPath,
-      mergedFrom: ensuredSingleSession.mergedFrom,
-      created: ensuredSingleSession.created,
-    });
 
-    const allRotationChanges = results
-      .filter((r: any) => r?.status === "ok" && Array.isArray(r?.changes))
-      .flatMap((r: any) => r.changes as Array<{ filePath: string; action: string; targetSessionFile?: string }>);
-    const sessionsJsonPath = path.join(config.sessionsRoot, "sessions.json");
-    if (fs.existsSync(sessionsJsonPath)) {
-      const syncRs = syncOpenClawSessionsJsonAfterRotation({
-        sessionsRoot: config.sessionsRoot,
-        changes: allRotationChanges,
-        normalize: ensuredSingleSession,
-        forceCanonicalSessionFile: ensuredSingleSession.keeperPath,
+    let ensuredSingleSession: { keeperPath: string; mergedFrom: string[]; created: boolean } | undefined;
+    if (options.ingestOnly !== true) {
+      /** 每轮管道结束：目录内仅保留一个 `.jsonl`（精炼已剥离的日不再出现在文件中，其余行合并到 keeper） */
+      ensuredSingleSession = normalizeToSingleSessionFile(config.sessionsRoot);
+      logger.info("daily-rotate.normalize_single_session", {
+        keeperPath: ensuredSingleSession.keeperPath,
+        mergedFrom: ensuredSingleSession.mergedFrom,
+        created: ensuredSingleSession.created,
       });
-      if (syncRs.touched) {
-        logger.info("daily-rotate.sessions_json_synced", {
-          updatedEntries: syncRs.updated,
-          path: syncRs.sessionsJsonPath,
+
+      const allRotationChanges = results
+        .filter((r: any) => r?.status === "ok" && Array.isArray(r?.changes))
+        .flatMap(
+          (r: any) => r.changes as Array<{ filePath: string; action: string; targetSessionFile?: string }>,
+        );
+      const sessionsJsonPath = path.join(config.sessionsRoot, "sessions.json");
+      if (fs.existsSync(sessionsJsonPath)) {
+        const syncRs = syncOpenClawSessionsJsonAfterRotation({
+          sessionsRoot: config.sessionsRoot,
+          changes: allRotationChanges,
+          normalize: ensuredSingleSession,
+          forceCanonicalSessionFile: ensuredSingleSession.keeperPath,
         });
+        if (syncRs.touched) {
+          logger.info("daily-rotate.sessions_json_synced", {
+            updatedEntries: syncRs.updated,
+            path: syncRs.sessionsJsonPath,
+          });
+        }
       }
     }
 
@@ -393,7 +404,7 @@ export async function runDailyRotatePipeline(
       dateKeys,
       results,
       openclawCleanup,
-      ensuredSingleSession,
+      ...(ensuredSingleSession ? { ensuredSingleSession } : {}),
     });
   }
 

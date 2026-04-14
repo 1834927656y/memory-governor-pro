@@ -33,7 +33,7 @@ This skill implements:
 - Single injector only: memory-lancedb autoRecall.
 - This skill never performs per-turn direct injection.
 - Session deletion runs only after successful ingestion and audit writes.
-- Audit / rollback CLI: `audit-inspect`, `audit-restore-sessions`, `audit-clear-rotation`, `audit-purge-memories`; optional `preRefineSessionSnapshot` in `config.json` for merge-target restore.
+- Audit / rollback CLI: `audit-inspect`, `audit-restore-sessions`, `audit-clear-rotation`, `audit-purge-memories`; `rollback-first-install-backfill`（按首装 `rotatedDateKeysAsc` 逆序一键回滚，旧版无记录时用 `--dates`）；可选 `preRefineSessionSnapshot` 以便恢复合并目标。
 - Recommended governor config overrides:
   - `rotateOnAgentEnd=true`
   - `rotateOnAgentEndCooldownMs=120000`

@@ -11,6 +11,9 @@ export interface ContextFlushConfig {
   minFlushIntervalMs?: number;
   contextWindowTokens?: number;
   query?: string;
+  autoResume?: boolean;
+  autoResumeTimeoutSec?: number;
+  autoResumePrompt?: string;
 }
 
 export interface SessionPressureSample {
@@ -20,6 +23,13 @@ export interface SessionPressureSample {
   approxTokens: number;
 }
 
+export interface SessionRuntimeContextSample {
+  sessionId: string;
+  sessionKey?: string;
+  channelId?: string;
+  userText?: string;
+}
+
 function clampPct(n: number): number {
   if (!Number.isFinite(n)) return 0;
   return Math.max(0, Math.min(100, n));
@@ -27,6 +37,13 @@ function clampPct(n: number): number {
 
 function resolveOpenClawHomeForMonitor(): string {
   return path.resolve(process.env.OPENCLAW_HOME?.trim() || path.join(os.homedir(), ".openclaw"));
+}
+
+function resolveStateHomeFromConfig(openclawConfigPath?: string): string {
+  if (typeof openclawConfigPath === "string" && openclawConfigPath.trim()) {
+    return path.resolve(path.dirname(openclawConfigPath));
+  }
+  return resolveOpenClawHomeForMonitor();
 }
 
 function discoverAgentIds(openclawConfigPath: string): string[] {
@@ -43,6 +60,69 @@ function estimateTokensFromChars(text: string): number {
   const cjkChars = (text.match(/[\u3400-\u9FFF]/g) || []).length;
   const asciiChars = Math.max(0, text.length - cjkChars);
   return Math.ceil(asciiChars / 4 + cjkChars / 1.8);
+}
+
+function contentToText(content: unknown): string {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  const parts: string[] = [];
+  for (const item of content) {
+    if (
+      item &&
+      typeof item === "object" &&
+      (item as { type?: unknown }).type === "text" &&
+      typeof (item as { text?: unknown }).text === "string"
+    ) {
+      parts.push((item as { text: string }).text);
+    }
+  }
+  return parts.join("\n").trim();
+}
+
+export function collectSessionRuntimeContext(
+  agentId: string,
+  sessionId: string,
+  openclawConfigPath?: string,
+): SessionRuntimeContextSample {
+  const cleanAgentId = agentId.trim() || "main";
+  const cleanSessionId = sessionId.trim();
+  if (!cleanSessionId) return { sessionId: "" };
+  const home = resolveStateHomeFromConfig(openclawConfigPath);
+  const sessionPath = path.join(home, "agents", cleanAgentId, "sessions", `${cleanSessionId}.jsonl`);
+  if (!fs.existsSync(sessionPath)) {
+    return { sessionId: cleanSessionId };
+  }
+  try {
+    const raw = fs.readFileSync(sessionPath, "utf8");
+    const lines = raw
+      .split(/\r?\n/)
+      .map((x) => x.trim())
+      .filter((x) => x.length > 0);
+    for (let i = lines.length - 1; i >= 0; i -= 1) {
+      const line = lines[i];
+      let parsed: any = null;
+      try {
+        parsed = JSON.parse(line);
+      } catch {
+        continue;
+      }
+      if (parsed?.type !== "message") continue;
+      if (parsed?.message?.role !== "user") continue;
+      const text = contentToText(parsed?.message?.content);
+      if (!text) continue;
+      return {
+        sessionId: cleanSessionId,
+        sessionKey: `agent:${cleanAgentId}:${cleanSessionId}`,
+        userText: text,
+      };
+    }
+  } catch {
+    return { sessionId: cleanSessionId };
+  }
+  return {
+    sessionId: cleanSessionId,
+    sessionKey: `agent:${cleanAgentId}:${cleanSessionId}`,
+  };
 }
 
 export function estimatePromptUsagePercent(
@@ -62,7 +142,7 @@ export function collectAllSessionPressure(
   openclawConfigPath: string,
   contextWindowTokens: number,
 ): SessionPressureSample[] {
-  const home = resolveOpenClawHomeForMonitor();
+  const home = resolveStateHomeFromConfig(openclawConfigPath);
   const samples: SessionPressureSample[] = [];
   for (const agentId of discoverAgentIds(openclawConfigPath)) {
     const sessionsRoot = path.join(home, "agents", agentId, "sessions");

@@ -11,15 +11,22 @@ import { ensureSelfImprovingFiles, listVendoredCapabilities } from "./lib/vendor
 import { resolveRuntimeConfig } from "./lib/runtime-config.js";
 import { todayYmdInTimeZone } from "./lib/daily-rotate.js";
 import { maybePruneArchiveByRetention } from "./lib/archive-ttl.js";
-import { runDailyRotatePipeline } from "./lib/daily-rotate.js";
+import { runDailyRotatePipeline, runOpenclawSessionsCleanup } from "./lib/daily-rotate.js";
 import { governorIsSessionStemBusy } from "./lib/governor-session-activity.js";
 import {
   assertValidDateKey,
   clearRotationDayRecord,
   inspectRotationDay,
   purgeGovernorMemoriesForDate,
+  purgeRefineArtifactDirsForDates,
   restoreSessionsFromArchive,
 } from "./lib/audit-rollback.js";
+import {
+  readGovernorEnabledAgentIds,
+  resolveRollbackDatesFromOpts,
+  rollbackFirstInstallBackfill,
+} from "./lib/rollback-first-install.js";
+import { rollbackAllRefined } from "./lib/rollback-all-refined.js";
 import type { Config } from "./types";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -220,6 +227,216 @@ program
     ensureDir(cfg.stateDir);
     const rs = await purgeGovernorMemoriesForDate(cfg, dateKey, Boolean(opts.dryRun));
     console.log(JSON.stringify(rs, null, 2));
+  });
+
+program
+  .command("rollback-first-install-backfill")
+  .description(
+    "回滚「首次安装自动回填」：按首装记录的日历日逆序恢复归档会话、清理当日治理向量与 rotation 台账，并默认重置 first-install-bootstrap.json 以便可再次首装回填",
+  )
+  .option("--agent <id>", "单个智能体 id（与 --all-governor-agents 互斥）")
+  .option(
+    "--all-governor-agents",
+    "对 openclaw.json 插件配置里 governor.enabledAgents 中的全部 agent 各执行一遍",
+    false,
+  )
+  .option(
+    "--dates <csv>",
+    "逗号或空白分隔的 YYYY-MM-DD 列表，覆盖标记文件中的 rotatedDateKeysAsc（旧版首装无记录时必填）",
+  )
+  .option("--dry-run", "仅演示 restore/purge/clear/delete 步骤，不改盘", false)
+  .option("--skip-restore-merge-targets", "不向 audit-restore 传入「合并目标」恢复快照", false)
+  .option("--keep-snapshots", "purge 后仍保留 snapshots/<日>.json", false)
+  .option("--keep-archives", "回滚成功后仍保留 agents/.../sessions/archive 下当日副本", false)
+  .option(
+    "--keep-pre-refine-snapshots",
+    "仍保留台账中的 preRefineSnapshotDir（单次精炼目录；默认仅删该目录）",
+    false,
+  )
+  .option("--no-reset-marker", "成功后不回写首装标记（默认会重置 done=false 以便再次首装）", false)
+  .option(
+    "--no-openclaw-cleanup",
+    "跳过末尾 openclaw sessions cleanup --all-agents --enforce（默认执行，用于同步 sessions.json 索引）",
+    false,
+  )
+  .option("--openclaw-bin <path>", "openclaw 可执行文件", "openclaw")
+  .action(async (opts) => {
+    const datesOverride = resolveRollbackDatesFromOpts(
+      typeof opts.dates === "string" ? opts.dates : undefined,
+    );
+    const baseResolved = resolveRuntimeConfig(rawConfig, { skillRoot });
+    let agentIds: string[];
+    if (opts.allGovernorAgents === true) {
+      agentIds = readGovernorEnabledAgentIds(baseResolved.openclawConfigPath);
+      if (agentIds.length === 0) {
+        console.error(
+          JSON.stringify(
+            {
+              ok: false,
+              error:
+                "未在 openclaw.json 的 memory-lancedb-pro / memory-governor-pro 插件 config.governor.enabledAgents 中找到任何 agent",
+            },
+            null,
+            2,
+          ),
+        );
+        process.exitCode = 1;
+        return;
+      }
+    } else {
+      const id =
+        typeof opts.agent === "string" && opts.agent.trim() ? opts.agent.trim() : undefined;
+      agentIds = [id || baseResolved.agentId];
+    }
+
+    const results: unknown[] = [];
+    for (const agentId of agentIds) {
+      const cfg = configForAgent(agentId);
+      ensureDir(cfg.stateDir);
+      const rs = await rollbackFirstInstallBackfill(cfg, {
+        dryRun: Boolean(opts.dryRun),
+        datesOverride,
+        restoreMergeTargets: opts.skipRestoreMergeTargets !== true,
+        deleteSnapshotsAfterPurge: opts.keepSnapshots !== true,
+        resetMarker: opts.noResetMarker !== true,
+        deleteArchivesAfterRollback: opts.keepArchives !== true,
+        deletePreRefineAfterRollback: opts.keepPreRefineSnapshots !== true,
+      });
+      results.push(rs);
+    }
+
+    let openclawCleanup: { ok: boolean; stderr: string } | undefined;
+    if (opts.openclawCleanup !== false && !opts.dryRun) {
+      const home = path.dirname(baseResolved.openclawConfigPath);
+      const cr = runOpenclawSessionsCleanup(
+        (opts.openclawBin as string) || "openclaw",
+        home,
+      );
+      openclawCleanup = { ok: cr.ok, stderr: cr.stderr.slice(0, 4000) };
+    }
+
+    console.log(
+      JSON.stringify(
+        { ok: true, agentCount: agentIds.length, results, openclawCleanup },
+        null,
+        2,
+      ),
+    );
+  });
+
+program
+  .command("rollback-all-refined")
+  .description(
+    "回滚当前 agent 全部已精炼状态：按日历日自新向旧恢复会话、purge 向量、清台账、删除参与回滚的 snapshots/<日>.json；磁盘收尾仅删台账 changes 中的归档文件与 preRefineSnapshotDir（非整日录；无台账的 ingest-only 日不删 pre-refine）",
+  )
+  .option("--agent <id>", "智能体 id（与 --all-governor-agents 互斥）")
+  .option(
+    "--all-governor-agents",
+    "对 openclaw.json 里 governor.enabledAgents 中的全部 agent 各执行一遍",
+    false,
+  )
+  .option("--dry-run", "只演示步骤，不改盘", false)
+  .option("--skip-restore", "不从归档恢复会话 jsonl（仅清向量与台账/快照）", false)
+  .option(
+    "--skip-restore-merge-targets",
+    "恢复会话时不使用 pre-refine 快照还原「合并目标」文件",
+    false,
+  )
+  .option("--keep-snapshots", "purge 后保留 snapshots/<日>.json", false)
+  .option("--keep-archives", "仍保留从台账恢复时所用的 archive 下副本（默认删）", false)
+  .option(
+    "--keep-pre-refine-snapshots",
+    "仍保留台账中的 preRefineSnapshotDir（单次精炼目录；默认删该目录而非整日-folder）",
+    false,
+  )
+  .option(
+    "--no-openclaw-cleanup",
+    "跳过末尾 openclaw sessions cleanup --all-agents --enforce",
+    false,
+  )
+  .option("--openclaw-bin <path>", "openclaw 可执行文件", "openclaw")
+  .action(async (opts) => {
+    const baseResolved = resolveRuntimeConfig(rawConfig, { skillRoot });
+    let agentIds: string[];
+    if (opts.allGovernorAgents === true) {
+      agentIds = readGovernorEnabledAgentIds(baseResolved.openclawConfigPath);
+      if (agentIds.length === 0) {
+        console.error(
+          JSON.stringify(
+            {
+              ok: false,
+              error:
+                "未在 governor.enabledAgents 中找到任何 agent（与 rollback-first-install-backfill 相同要求）",
+            },
+            null,
+            2,
+          ),
+        );
+        process.exitCode = 1;
+        return;
+      }
+    } else {
+      const id =
+        typeof opts.agent === "string" && opts.agent.trim() ? opts.agent.trim() : undefined;
+      agentIds = [id || baseResolved.agentId];
+    }
+
+    const results: unknown[] = [];
+    for (const agentId of agentIds) {
+      const cfg = configForAgent(agentId);
+      ensureDir(cfg.stateDir);
+      const rs = await rollbackAllRefined(cfg, {
+        dryRun: Boolean(opts.dryRun),
+        restoreSessions: opts.skipRestore !== true,
+        restoreMergeTargets: opts.skipRestoreMergeTargets !== true,
+        deleteSnapshotsAfterPurge: opts.keepSnapshots !== true,
+        deleteArchivesAfterRollback: opts.keepArchives !== true,
+        deletePreRefineAfterRollback: opts.keepPreRefineSnapshots !== true,
+      });
+      results.push(rs);
+    }
+
+    let openclawCleanup: { ok: boolean; stderr: string } | undefined;
+    if (opts.openclawCleanup !== false && !opts.dryRun) {
+      const home = path.dirname(baseResolved.openclawConfigPath);
+      const cr = runOpenclawSessionsCleanup(
+        (opts.openclawBin as string) || "openclaw",
+        home,
+      );
+      openclawCleanup = { ok: cr.ok, stderr: cr.stderr.slice(0, 4000) };
+    }
+
+    console.log(
+      JSON.stringify({ ok: true, agentCount: agentIds.length, results, openclawCleanup }, null, 2),
+    );
+  });
+
+program
+  .command("purge-refine-artifact-dirs")
+  .description(
+    "无台账时按日历日整目录删除 archive/<日> 与 pre-refine-snapshots/<日>（默认拒绝执行，须 --force 确认）",
+  )
+  .requiredOption("--dates <csv>", "逗号或空白分隔的 YYYY-MM-DD")
+  .option("--agent <id>", "智能体 id")
+  .option("--dry-run", "只列出将删除的目录", false)
+  .option(
+    "--force",
+    "确认整目录删除（与带 rotation 的回滚选择性删文件不同；误删风险自负）",
+    false,
+  )
+  .action(async (opts) => {
+    const rawDates = String(opts.dates || "")
+      .split(/[\s,]+/)
+      .map((s) => s.trim())
+      .filter(Boolean);
+    const cfg = configForAgent(opts.agent as string | undefined);
+    ensureDir(cfg.stateDir);
+    const rs = purgeRefineArtifactDirsForDates(cfg, rawDates, {
+      dryRun: Boolean(opts.dryRun),
+      forceWholeDateDirs: opts.force === true,
+    });
+    console.log(JSON.stringify({ ok: !rs.skipped, agentId: cfg.agentId, ...rs }, null, 2));
+    if (rs.skipped) process.exitCode = 1;
   });
 
 program

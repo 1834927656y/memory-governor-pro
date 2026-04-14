@@ -72,7 +72,12 @@ export async function rotateDay(
     allowDelete?: boolean;
     safety?: RotateDaySafety;
     /** 跳过 safety（仅的内部调度 maxDefer 后与手工 --force-ignore-quiet） */
-    forceIgnoreSafety?: boolean
+    forceIgnoreSafety?: boolean;
+    /**
+     * 仅聚合 → 精炼 → 写入向量与 snapshots，不改写 jsonl、不归档、不做 pre-refine 快照、不写 rotation-state。
+     * 用于高频任务结束 / 上下文 flush；完整「剥皮」仍由日终或 CLI 执行。
+     */
+    ingestOnly?: boolean;
   } = {},
 ) {
   const batchId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -114,7 +119,10 @@ export async function rotateDay(
   const upsertRs = await upsertMemories(config.lancedb, refined);
   upsertGovernanceStateFromRefined(config.stateDir, refined);
   logger.info("nightly.ingested", { dateKey, count: refined.length, storageMode: upsertRs.mode });
-  writeJson(path.join(config.stateDir, "snapshots", `${dateKey}.json`), { dateKey, refined, sourceFiles: bucket.sourceFiles, upsertRs });
+  if (opts.ingestOnly) {
+    logger.info("nightly.ingest_only_done", { dateKey, ingested: refined.length });
+    return { status: "ok_ingest_only", dateKey, ingested: refined.length };
+  }
   if (opts.skipDelete) return { status: "ok_no_delete", dateKey, ingested: refined.length };
 
   let preRefineSnapshotDir: string | undefined;

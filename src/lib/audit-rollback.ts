@@ -58,6 +58,11 @@ export function readRotationDayRecord(stateDir: string, dateKey: string): Rotati
   return rec && typeof rec === "object" ? rec : null;
 }
 
+/** 供外部判断某日是否仍有轮转台账（回滚 CLI 等）。 */
+export function hasRotationDayRecord(stateDir: string, dateKey: string): boolean {
+  return readRotationDayRecord(stateDir, dateKey) != null;
+}
+
 /** 只读核对：轮转台账、归档文件是否存在、精炼快照、调度锚点等。 */
 export function inspectRotationDay(config: Config, dateKey: string): Record<string, unknown> {
   assertValidDateKey(dateKey);
@@ -232,6 +237,230 @@ export function restoreSessionsFromArchive(
     restored,
     mergeTargetRestores,
     skipped,
+    warnings,
+  };
+}
+
+function normalizedPathPrefix(dir: string): string {
+  const r = path.resolve(dir);
+  return r.replace(/\\/g, "/").toLowerCase();
+}
+
+function isPathUnder(childAbs: string, parentAbs: string): boolean {
+  const c = childAbs.replace(/\\/g, "/").toLowerCase();
+  const p = parentAbs.replace(/\\/g, "/").toLowerCase();
+  return c === p || c.startsWith(p.endsWith("/") ? p : `${p}/`);
+}
+
+export interface RollbackDiskCleanupResult {
+  dateKey: string;
+  dryRun: boolean;
+  deletedArchiveFiles: string[];
+  removedPreRefineDirs: string[];
+  warnings: string[];
+}
+
+/**
+ * 回滚收尾（按台账选择性）：
+ * - 归档：仅删除 rotation changes 中列出的 archived 文件；若当日目录因此变空则 rmdir。
+ * - 精炼前快照：仅删除台账中的 preRefineSnapshotDir（单次精炼对应的时间戳子目录），不删同日其它未记入台账的子目录。
+ */
+export function cleanupRollbackArtifactsOnDisk(
+  config: Config,
+  dateKey: string,
+  record: RotationDayRecord | null,
+  opts: {
+    dryRun: boolean;
+    deleteArchiveCopies: boolean;
+    deletePreRefineForDateKey: boolean;
+  },
+): RollbackDiskCleanupResult {
+  assertValidDateKey(dateKey);
+  const warnings: string[] = [];
+  const deletedArchiveFiles: string[] = [];
+  const removedPreRefineDirs: string[] = [];
+  const archiveRootAbs = path.resolve(config.archiveRoot);
+  const stateDirAbs = path.resolve(config.stateDir);
+
+  if (opts.deleteArchiveCopies && record?.changes?.length) {
+    const seen = new Set<string>();
+    for (const ch of record.changes) {
+      const arch = typeof ch.archived === "string" ? ch.archived.trim() : "";
+      if (!arch) continue;
+      const resolved = path.resolve(arch);
+      const key = normalizedPathPrefix(resolved);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      if (!isPathUnder(resolved, archiveRootAbs)) {
+        warnings.push(`跳过非本 archiveRoot 的归档路径：${arch}`);
+        continue;
+      }
+      if (!fs.existsSync(resolved)) {
+        warnings.push(`归档副本已不存在（跳过）：${arch}`);
+        continue;
+      }
+      try {
+        const st = fs.statSync(resolved);
+        if (!st.isFile()) {
+          warnings.push(`归档路径不是文件（跳过）：${arch}`);
+          continue;
+        }
+      } catch (e) {
+        warnings.push(`无法 stat 归档路径（跳过）：${arch} ${String(e)}`);
+        continue;
+      }
+      deletedArchiveFiles.push(resolved);
+      if (!opts.dryRun) {
+        fs.unlinkSync(resolved);
+      }
+    }
+
+    if (!opts.dryRun && deletedArchiveFiles.length > 0) {
+      const dayDir = path.join(archiveRootAbs, dateKey);
+      try {
+        if (fs.existsSync(dayDir) && fs.statSync(dayDir).isDirectory()) {
+          const rest = fs.readdirSync(dayDir);
+          if (rest.length === 0) {
+            fs.rmdirSync(dayDir);
+          }
+        }
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+
+  if (opts.deletePreRefineForDateKey) {
+    const raw =
+      typeof record?.preRefineSnapshotDir === "string" ? record.preRefineSnapshotDir.trim() : "";
+    const preRefineRootResolved = path.resolve(path.join(stateDirAbs, "pre-refine-snapshots"));
+    if (!raw) {
+      warnings.push(
+        "台账未记录 preRefineSnapshotDir；跳过删除精炼前快照（避免误删 pre-refine-snapshots 下其它时间戳目录）。",
+      );
+    } else {
+      const resolvedPre = path.resolve(raw);
+      if (!isPathUnder(resolvedPre, preRefineRootResolved)) {
+        warnings.push(`preRefineSnapshotDir 不在 pre-refine-snapshots 下，跳过：${raw}`);
+      } else if (!fs.existsSync(resolvedPre)) {
+        warnings.push(`改写前快照目录已不存在（跳过）：${raw}`);
+      } else {
+        removedPreRefineDirs.push(resolvedPre);
+        if (!opts.dryRun) {
+          fs.rmSync(resolvedPre, { recursive: true, force: true });
+          const parent = path.dirname(resolvedPre);
+          try {
+            if (
+              parent !== preRefineRootResolved &&
+              fs.existsSync(parent) &&
+              fs.statSync(parent).isDirectory() &&
+              fs.readdirSync(parent).length === 0
+            ) {
+              fs.rmdirSync(parent);
+            }
+          } catch {
+            /* ignore */
+          }
+        }
+      }
+    }
+  }
+
+  appendAudit(config.stateDir, "audit.rollback_disk_cleanup", {
+    dateKey,
+    dryRun: opts.dryRun,
+    archiveFiles: deletedArchiveFiles.length,
+    preRefineDirs: removedPreRefineDirs.length,
+  });
+
+  return {
+    dateKey,
+    dryRun: opts.dryRun,
+    deletedArchiveFiles,
+    removedPreRefineDirs,
+    warnings,
+  };
+}
+
+export interface PurgeRefineArtifactDirsResult {
+  dryRun: boolean;
+  /** 未传 --force 时不会删盘，仅返回说明 */
+  skipped?: boolean;
+  skipReason?: string;
+  removedArchiveDirs: string[];
+  removedPreRefineDirs: string[];
+  warnings: string[];
+}
+
+/**
+ * 按日历日**整目录**删除 archiveRoot/<dateKey>/ 与 pre-refine-snapshots/<dateKey>/。
+ * 无 rotation 台账时无法知道哪些文件属于某次精炼，因此默认 **拒绝执行**，须 `forceWholeDateDirs: true` 显式承担误删风险。
+ */
+export function purgeRefineArtifactDirsForDates(
+  config: Config,
+  dateKeys: string[],
+  opts: { dryRun: boolean; forceWholeDateDirs: boolean },
+): PurgeRefineArtifactDirsResult {
+  const archiveRootAbs = path.resolve(config.archiveRoot);
+  const stateDirAbs = path.resolve(config.stateDir);
+  const removedArchiveDirs: string[] = [];
+  const removedPreRefineDirs: string[] = [];
+  const warnings: string[] = [];
+
+  const unique = [...new Set(dateKeys.map((d) => d.trim()).filter(Boolean))];
+
+  if (!opts.forceWholeDateDirs) {
+    return {
+      dryRun: opts.dryRun,
+      skipped: true,
+      skipReason:
+        "未指定 forceWholeDateDirs：为避免误删，请优先使用带 rotation 台账的 rollback（按 changes / preRefineSnapshotDir 选择性删除）；若台账已清空且你确认整个日历日目录均可删，再传入 force。",
+      removedArchiveDirs: [],
+      removedPreRefineDirs: [],
+      warnings,
+    };
+  }
+
+  for (const dateKey of unique) {
+    assertValidDateKey(dateKey);
+    const arDir = path.resolve(path.join(archiveRootAbs, dateKey));
+    if (fs.existsSync(arDir)) {
+      if (!isPathUnder(arDir, archiveRootAbs)) {
+        warnings.push(`跳过异常 archive 路径：${arDir}`);
+      } else if (!fs.statSync(arDir).isDirectory()) {
+        warnings.push(`archive 路径不是目录：${arDir}`);
+      } else {
+        removedArchiveDirs.push(arDir);
+        if (!opts.dryRun) {
+          fs.rmSync(arDir, { recursive: true, force: true });
+        }
+      }
+    }
+
+    const preDir = path.resolve(path.join(stateDirAbs, "pre-refine-snapshots", dateKey));
+    if (fs.existsSync(preDir)) {
+      if (!isPathUnder(preDir, stateDirAbs)) {
+        warnings.push(`跳过异常 pre-refine 路径：${preDir}`);
+      } else {
+        removedPreRefineDirs.push(preDir);
+        if (!opts.dryRun) {
+          fs.rmSync(preDir, { recursive: true, force: true });
+        }
+      }
+    }
+  }
+
+  appendAudit(config.stateDir, "audit.purge_refine_artifact_dirs", {
+    dryRun: opts.dryRun,
+    dates: unique,
+    archiveDirs: removedArchiveDirs.length,
+    preRefineDirs: removedPreRefineDirs.length,
+  });
+
+  return {
+    dryRun: opts.dryRun,
+    removedArchiveDirs,
+    removedPreRefineDirs,
     warnings,
   };
 }

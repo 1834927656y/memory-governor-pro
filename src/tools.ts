@@ -73,6 +73,31 @@ interface ToolContext {
   workspaceDir?: string;
   mdMirror?: MdMirrorWriter | null;
   workspaceBoundary?: WorkspaceBoundaryConfig;
+  /** 与 openclaw.json governor.enabledAgents 白名单一致；未设置则不限制 */
+  isAgentGovernorEnabled?: (agentId: string | undefined) => boolean;
+}
+
+/** governor.enabledAgents 白名单拒绝时供 tool execute 直接返回 */
+function rejectIfGovernorAgentDisabled(
+  context: ToolContext,
+  agentId: string,
+): {
+  content: Array<{ type: "text"; text: string }>;
+  details: Record<string, unknown>;
+} | null {
+  const gate = context.isAgentGovernorEnabled;
+  if (!gate) return null;
+  if (gate(agentId)) return null;
+  return {
+    content: [
+      {
+        type: "text",
+        text:
+          `Memory 功能未对该 agent（${agentId}）启用：请在 openclaw.json 的 memory 插件 config.governor.enabledAgents 中加入该 id。`,
+      },
+    ],
+    details: { error: "governor_agent_not_enabled", agentId },
+  };
 }
 
 function resolveAgentId(runtimeAgentId: unknown, fallback?: string): string | undefined {
@@ -103,6 +128,26 @@ function truncateText(text: string, maxChars: number): string {
   if (text.length <= maxChars) return text;
   const clipped = text.slice(0, Math.max(1, maxChars - 1)).trimEnd();
   return `${clipped}…`;
+}
+
+function isLikelyExactRecallQuery(query: string): boolean {
+  const trimmed = query.trim();
+  if (trimmed.length < 8) return false;
+  if (/\s/.test(trimmed)) return false;
+  return /[_:-]/.test(trimmed) || /\d/.test(trimmed);
+}
+
+function matchesExactRecallQuery(entry: { id: string; text: string; metadata?: string }, query: string): boolean {
+  const needle = query.trim().toLowerCase();
+  if (!needle) return false;
+  if (entry.id.toLowerCase().startsWith(needle)) return true;
+  if (entry.text.toLowerCase().includes(needle)) return true;
+  const meta = parseSmartMetadata(entry.metadata, entry as any);
+  return (
+    meta.l0_abstract.toLowerCase().includes(needle) ||
+    meta.l1_overview.toLowerCase().includes(needle) ||
+    meta.l2_content.toLowerCase().includes(needle)
+  );
 }
 
 function deriveManualMemoryLayer(category: string): "durable" | "working" {
@@ -296,6 +341,8 @@ export function registerSelfImprovementLogTool(api: OpenClawPluginApi, context: 
           const workspaceDir = resolveWorkspaceDir(toolCtx, context.workspaceDir);
           const runtimeContext = resolveToolContext(context, toolCtx);
           const agentId = runtimeContext.agentId;
+          const denied = rejectIfGovernorAgentDisabled(context, agentId);
+          if (denied) return denied;
           const scopeFilter = resolveScopeFilter(context.scopeManager, agentId);
           let scope = context.scopeManager.getDefaultScope(agentId);
           if (!context.scopeManager.isAccessible(scope, agentId)) {
@@ -381,6 +428,8 @@ export function registerSelfImprovementExtractSkillTool(api: OpenClawPluginApi, 
           await ensureSelfImprovementLearningFiles(workspaceDir);
           const runtimeContext = resolveToolContext(context, toolCtx);
           const agentId = runtimeContext.agentId;
+          const deniedEx = rejectIfGovernorAgentDisabled(context, agentId);
+          if (deniedEx) return deniedEx;
           const scopeFilter = resolveScopeFilter(context.scopeManager, agentId);
 
           const safeOutputDir = outputDir
@@ -522,6 +571,8 @@ export function registerSelfImprovementReviewTool(api: OpenClawPluginApi, contex
           await ensureSelfImprovementLearningFiles(workspaceDir);
           const runtimeContext = resolveToolContext(context, toolCtx);
           const agentId = runtimeContext.agentId;
+          const deniedRv = rejectIfGovernorAgentDisabled(context, agentId);
+          if (deniedRv) return deniedRv;
           const scopeFilter = resolveScopeFilter(context.scopeManager, agentId);
           const rules = await listSelfImprovementRules(context.store, scopeFilter, 5000);
 
@@ -651,6 +702,8 @@ export function registerMemoryRecallTool(
             : clampInt(limit, 1, 6);
           const safeCharsPerItem = clampInt(maxCharsPerItem, 60, 1000);
           const agentId = runtimeContext.agentId;
+          const deniedRecall = rejectIfGovernorAgentDisabled(context, agentId);
+          if (deniedRecall) return deniedRecall;
 
           // Determine accessible scopes
           let scopeFilter = resolveScopeFilter(runtimeContext.scopeManager, agentId);
@@ -670,13 +723,19 @@ export function registerMemoryRecallTool(
             }
           }
 
-          const results = filterUserMdExclusiveRecallResults(await retrieveWithRetry(runtimeContext.retriever, {
+          let results = filterUserMdExclusiveRecallResults(await retrieveWithRetry(runtimeContext.retriever, {
             query,
             limit: safeLimit,
             scopeFilter,
             category,
             source: "manual",
           }), runtimeContext.workspaceBoundary);
+
+          // For exact-looking keys (UUID-ish / token-like), prefer literal matches
+          // to avoid unrelated semantic neighbors masking "not found" states.
+          if (isLikelyExactRecallQuery(query)) {
+            results = results.filter((r) => matchesExactRecallQuery(r.entry, query));
+          }
 
           if (results.length === 0) {
             return {
@@ -799,6 +858,8 @@ export function registerMemoryStoreTool(
 
         try {
           const agentId = runtimeContext.agentId;
+          const deniedStore = rejectIfGovernorAgentDisabled(context, agentId);
+          if (deniedStore) return deniedStore;
           // Determine target scope
           let targetScope = scope;
           if (!targetScope) {
@@ -1006,6 +1067,8 @@ export function registerMemoryForgetTool(
 
         try {
           const agentId = resolveRuntimeAgentId(runtimeContext.agentId, runtimeCtx);
+          const deniedForget = rejectIfGovernorAgentDisabled(context, agentId);
+          if (deniedForget) return deniedForget;
           // Determine accessible scopes
           let scopeFilter = resolveScopeFilter(runtimeContext.scopeManager, agentId);
           if (scope) {
@@ -1182,6 +1245,8 @@ export function registerMemoryUpdateTool(
 
           // Determine accessible scopes
           const agentId = resolveRuntimeAgentId(runtimeContext.agentId, runtimeCtx);
+          const deniedUpd = rejectIfGovernorAgentDisabled(context, agentId);
+          if (deniedUpd) return deniedUpd;
           const scopeFilter = resolveScopeFilter(runtimeContext.scopeManager, agentId);
 
           // Resolve memoryId: if it doesn't look like a UUID, try search
@@ -1333,12 +1398,45 @@ export function registerMemoryUpdateTool(
           }
           // --- End temporal supersede guard ---
 
+          const existingForPatch = await context.store.getById(resolvedId, scopeFilter);
+          if (!existingForPatch) {
+            return {
+              content: [
+                {
+                  type: "text",
+                  text: `Memory ${resolvedId.slice(0, 8)}... not found or access denied.`,
+                },
+              ],
+              details: { error: "not_found", id: resolvedId },
+            };
+          }
+
           const updates: Record<string, any> = {};
           if (text) updates.text = text;
           if (newVector) updates.vector = newVector;
           if (importance !== undefined)
             updates.importance = clamp01(importance, 0.7);
           if (category) updates.category = category;
+
+          // Keep smart metadata in sync with editable fields so recall rendering
+          // and lexical retrieval reflect the latest text/category/importance.
+          if (text || importance !== undefined || category) {
+            const metadataPatch: Record<string, unknown> = {};
+            if (text) {
+              metadataPatch.l0_abstract = text;
+              metadataPatch.l1_overview = `- ${text}`;
+              metadataPatch.l2_content = text;
+            }
+            if (importance !== undefined) {
+              metadataPatch.confidence = clamp01(importance, 0.7);
+            }
+            if (category) {
+              metadataPatch.memory_category = category;
+              metadataPatch.memory_layer = deriveManualMemoryLayer(category);
+            }
+            const mergedMeta = buildSmartMetadata(existingForPatch, metadataPatch);
+            updates.metadata = stringifySmartMetadata(mergedMeta);
+          }
 
           const updated = await context.store.update(
             resolvedId,
@@ -1419,6 +1517,8 @@ export function registerMemoryStatsTool(
 
         try {
           const agentId = resolveRuntimeAgentId(runtimeContext.agentId, runtimeCtx);
+          const deniedSt = rejectIfGovernorAgentDisabled(context, agentId);
+          if (deniedSt) return deniedSt;
           // Determine accessible scopes
           let scopeFilter = resolveScopeFilter(context.scopeManager, agentId);
           if (scope) {
@@ -1541,6 +1641,8 @@ export function registerMemoryDebugTool(
             query: string; limit?: number; scope?: string;
           };
           try {
+            const deniedDbg = rejectIfGovernorAgentDisabled(context, agentId);
+            if (deniedDbg) return deniedDbg;
             const safeLimit = clampInt(limit, 1, 20);
             let scopeFilter = resolveScopeFilter(context.scopeManager, agentId);
             if (scope) {
@@ -1823,6 +1925,8 @@ export function registerMemoryPromoteTool(
           }
 
           const agentId = resolveRuntimeAgentId(runtimeContext.agentId, runtimeCtx);
+          const deniedPr = rejectIfGovernorAgentDisabled(context, agentId);
+          if (deniedPr) return deniedPr;
           let scopeFilter = resolveScopeFilter(context.scopeManager, agentId);
           if (scope) {
             if (!context.scopeManager.isAccessible(scope, agentId)) {
@@ -1926,6 +2030,8 @@ export function registerMemoryArchiveTool(
           }
 
           const agentId = resolveRuntimeAgentId(runtimeContext.agentId, runtimeCtx);
+          const deniedAr = rejectIfGovernorAgentDisabled(context, agentId);
+          if (deniedAr) return deniedAr;
           let scopeFilter = resolveScopeFilter(context.scopeManager, agentId);
           if (scope) {
             if (!context.scopeManager.isAccessible(scope, agentId)) {
@@ -2001,6 +2107,8 @@ export function registerMemoryDedupeTool(
 
           const safeLimit = clampInt(limit, 20, 1000);
           const agentId = resolveRuntimeAgentId(runtimeContext.agentId, runtimeCtx);
+          const deniedDe = rejectIfGovernorAgentDisabled(context, agentId);
+          if (deniedDe) return deniedDe;
           let scopeFilter = resolveScopeFilter(context.scopeManager, agentId);
           if (scope) {
             if (!context.scopeManager.isAccessible(scope, agentId)) {
@@ -2099,6 +2207,8 @@ export function registerMemoryExplainRankTool(
 
           const safeLimit = clampInt(limit, 1, 20);
           const agentId = resolveRuntimeAgentId(runtimeContext.agentId, runtimeCtx);
+          const deniedExR = rejectIfGovernorAgentDisabled(context, agentId);
+          if (deniedExR) return deniedExR;
           let scopeFilter = resolveScopeFilter(context.scopeManager, agentId);
           if (scope) {
             if (!context.scopeManager.isAccessible(scope, agentId)) {
