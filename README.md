@@ -26,6 +26,7 @@
 - [配置项详解](#配置项详解)
 - [常用命令](#常用命令)
 - [运维与排障](#运维与排障)
+- [发布验证结果](#发布验证结果)
 - [FAQ](#faq)
 - [许可证](#许可证)
 
@@ -343,6 +344,36 @@ npm run governor:verify-layered-injection
 - **库冲突**：确保主库与治理库路径隔离。  
 - **上下文仍膨胀**：降低 `autoRecallMaxChars`，并开启 `runtimeVectorOnlyRecall`。  
 
+### 发布验证结果
+
+本仓库当前版本已经完成发布前验证，结论是：**可以上线，建议先灰度/β 发布。**
+
+验证项：
+
+- `node node_modules/typescript/bin/tsc --noEmit -p tsconfig.json` ✅
+- `npm run governor:test-blackbox-random`（200 次真随机）✅
+  - `failures: []`
+  - `warningCount: 0`
+  - `toolStoreCreated: true`
+  - `toolRecallFound: true`
+  - `similarRecallDistinguished: true`
+- `MGP_BLACKBOX_SEED=424242 npm run governor:test-blackbox-random`（固定 seed 回归）✅
+- `npm run governor:release-gate-full` ✅
+- `npm_config_cache=/tmp/npm-cache npm pack --dry-run` ✅
+
+已确认的关键行为：
+
+- 真实用户式自然语言黑盒通过
+- 相似记忆可按 owner / 项目 / 时间窗 / 主题区分，不会靠前缀混淆
+- 区分条件不足时会返回歧义，而不是猜测
+- `.omx/`、`state/`、`ISSUES_SUMMARY.md`、`memories.json` 不会进入发布包
+
+仍建议关注的非阻塞风险：
+
+- 旧记忆如果尚未重建锚点，区分能力会略弱
+- 超大记忆库下 literal recall 还有索引化优化空间
+- 高并发读写的极端场景仍值得后续压测
+
 ### FAQ
 
 **Q1: 为什么要分主库和治理库？**  
@@ -385,6 +416,7 @@ MIT
 - [Configuration Reference](#configuration-reference)
 - [Commands](#commands)
 - [Operations and Troubleshooting](#operations-and-troubleshooting)
+- [Release Validation](#release-validation)
 - [FAQ](#faq-1)
 - [License](#license)
 
@@ -550,6 +582,36 @@ npm run governor:test-full-strip
 - Excess governance injection: tighten strict retrieval and reduce governance budget.
 - Duplicate reminders: avoid enabling multiple reminder providers simultaneously.
 - Context bloat: lower recall budget and keep `runtimeVectorOnlyRecall=true`.
+
+### Release Validation
+
+This version has completed release validation and is **ready to ship**. A **beta / gradual rollout** is still recommended first.
+
+Verified checks:
+
+- `node node_modules/typescript/bin/tsc --noEmit -p tsconfig.json` ✅
+- `npm run governor:test-blackbox-random` (200 fully random turns) ✅
+  - `failures: []`
+  - `warningCount: 0`
+  - `toolStoreCreated: true`
+  - `toolRecallFound: true`
+  - `similarRecallDistinguished: true`
+- `MGP_BLACKBOX_SEED=424242 npm run governor:test-blackbox-random` (fixed-seed regression) ✅
+- `npm run governor:release-gate-full` ✅
+- `npm_config_cache=/tmp/npm-cache npm pack --dry-run` ✅
+
+Confirmed behavior:
+
+- Real-user style blackbox QA passes
+- Similar memories are distinguished by natural-language anchors such as owner, project, time window, and topic
+- If the query does not provide enough distinguishing detail, the tool returns ambiguity instead of guessing
+- `.omx/`, `state/`, `ISSUES_SUMMARY.md`, and `memories.json` are excluded from the release package
+
+Non-blocking risks to keep monitoring:
+
+- Older memories without rebuilt anchors may be slightly weaker
+- Very large memory stores still leave room for index-based literal-search optimization
+- Extremely high-concurrency read/write scenarios deserve future pressure testing
 
 ### FAQ
 
