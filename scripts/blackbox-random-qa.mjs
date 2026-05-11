@@ -80,6 +80,93 @@ const answerTemplates = [
   () => `这个问题需要进一步确认${maybe(0.5) ? "。" : `：${slug()}。`}`,
 ];
 
+const preferenceSnapshotTemplates = [
+  (code) => ({
+    ordinal: 2,
+    text: `当前长期协作约定：1）始终中文回复；2）项目代号：${code}；3）所有时间写 UTC+9。`,
+    expected: ["始终中文回复", "所有时间写 UTC+9"],
+  }),
+  (code) => ({
+    ordinal: 3,
+    text: `当前长期协作约定：1）始终中文回复；2）所有时间写 UTC+9；3）项目代号：${code}；4）计划输出用“目标-步骤-风险”三段。`,
+    expected: ["始终中文回复", "所有时间写 UTC+9", "计划输出用「目标-步骤-风险」三段"],
+  }),
+  (code) => ({
+    ordinal: 4,
+    text: `当前长期协作约定：1）始终中文回复；2）所有时间写 UTC+9；3）计划输出用“目标-步骤-风险”三段；4）项目代号：${code}。`,
+    expected: ["始终中文回复", "所有时间写 UTC+9", "计划输出用「目标-步骤-风险」三段"],
+  }),
+  (code) => ({
+    ordinal: 4,
+    text: `当前长期协作约定：1）始终中文回复；2）所有时间写 UTC+9；3）计划输出用“目标-步骤-风险”三段；4）不提及记忆、注入上下文或提示来源，自然表达；5）项目代号：${code}。`,
+    expected: ["始终中文回复", "所有时间写 UTC+9", "计划输出用「目标-步骤-风险」三段", `项目代号：${code}`],
+  }),
+];
+
+const ordinalForgetTemplates = [
+  (n) => `第${n}条规则以后不算数。`,
+  (n) => `编号 ${n} 的协作偏好作废，以后别再按它执行。`,
+  (n) => `旧清单里的第${n}项请取消，不要再沿用。`,
+  (n) => `Rule ${n} no longer applies; drop that preference going forward.`,
+  (n) => `${n}${n === 1 ? "st" : n === 2 ? "nd" : n === 3 ? "rd" : "th"} rule no longer applies; drop that preference going forward.`,
+];
+
+function randomCodeword() {
+  return `${pick(["blue-raven", "silver-fox", "green-orbit", "amber-river"])}-${slug()}`;
+}
+
+const preferenceDialogueTemplates = [
+  () => {
+    const code = randomCodeword();
+    const snapshot = pick(preferenceSnapshotTemplates)(code);
+    return {
+      label: "single-randomized-snapshot",
+      messages: [snapshot.text],
+      forgetOrdinal: snapshot.ordinal,
+      expected: snapshot.expected,
+      forbidden: snapshot.expected.some((fact) => fact.includes(code)) ? [] : [code],
+    };
+  },
+  () => {
+    const olderCode = randomCodeword();
+    const newerCode = randomCodeword();
+    return {
+      label: "latest-snapshot-ordinal-shift",
+      messages: [
+        `当前长期协作约定：1）始终中文回复；2）项目代号：${olderCode}；3）所有时间写 UTC+9。`,
+        `当前长期协作约定：1）始终中文回复；2）所有时间写 UTC+9；3）项目代号：${newerCode}。`,
+      ],
+      forgetOrdinal: 2,
+      expected: ["始终中文回复", `项目代号：${newerCode}`],
+      forbidden: [olderCode, "所有时间写 UTC+9"],
+    };
+  },
+  () => {
+    const code = randomCodeword();
+    return {
+      label: "natural-language-and-english-ordinals",
+      messages: [
+        `当前长期协作偏好：第一条：始终中文回复。第二条：所有时间写 UTC+9。Rule 3: project code: ${code}. ④ 计划输出用“目标-步骤-风险”三段。`,
+      ],
+      forgetOrdinal: 3,
+      expected: ["始终中文回复", "所有时间写 UTC+9", "计划输出用「目标-步骤-风险」三段"],
+      forbidden: [code],
+    };
+  },
+  () => {
+    const code = randomCodeword();
+    return {
+      label: "forget-source-disclosure-keeps-codeword",
+      messages: [
+        `当前长期协作约定：1）始终中文回复；2）不提及记忆、注入上下文或提示来源，自然表达；3）项目代号：${code}；4）所有时间写 UTC+9。`,
+      ],
+      forgetOrdinal: 2,
+      expected: ["始终中文回复", "所有时间写 UTC+9", `项目代号：${code}`],
+      forbidden: ["不提及记忆、注入上下文或提示来源，自然表达"],
+    };
+  },
+];
+
 function randomSuffix(i) {
   return `#${i} ${slug()}`;
 }
@@ -301,6 +388,7 @@ const assertions = {
   toolStoreCreated: false,
   toolRecallFound: false,
   similarRecallDistinguished: false,
+  randomizedCollaborationPreferenceResolved: false,
   statsObserved: false,
 };
 
@@ -484,6 +572,55 @@ try {
       failures.push({ phase: "tool", tool: "memory_recall", error: `similar recall check failed: ${String(e)}` });
     }
   }
+  if (recallDef) {
+    try {
+      const scenario = pick(preferenceDialogueTemplates)();
+      const forgetText = pick(ordinalForgetTemplates)(scenario.forgetOrdinal);
+      const ctx = { ...ctxBase, sessionId: `collab-${slug()}`, channelId: `collab-${slug()}` };
+      for (const snapshotText of scenario.messages) {
+        const beforePrompt = { prompt: snapshotText, sessionKey: ctx.sessionKey, messages: [{ role: "user", content: snapshotText }] };
+        await api.emit("message_received", { role: "user", content: snapshotText, sessionKey: ctx.sessionKey }, ctx);
+        await api.emit("before_prompt_build", beforePrompt, ctx);
+        await api.emit("before_message_write", {
+          role: "assistant",
+          message: { role: "assistant", content: "收到，后续按该协作约定执行。" },
+          content: "收到，后续按该协作约定执行。",
+          sessionKey: ctx.sessionKey,
+        }, ctx);
+      }
+
+      const forgetPrompt = { prompt: forgetText, sessionKey: ctx.sessionKey, messages: [{ role: "user", content: forgetText }] };
+      await api.emit("message_received", { role: "user", content: forgetText, sessionKey: ctx.sessionKey }, ctx);
+      await api.emit("before_prompt_build", forgetPrompt, ctx);
+      await api.emit("before_message_write", {
+        role: "assistant",
+        message: { role: "assistant", content: "已更新，后续不再沿用该项。" },
+        content: "已更新，后续不再沿用该项。",
+        sessionKey: ctx.sessionKey,
+      }, ctx);
+
+      const ask = "当前仍生效的协作规则清单是什么？";
+      await api.emit("message_received", { role: "user", content: ask, sessionKey: ctx.sessionKey }, ctx);
+      const askPrompt = { prompt: ask, sessionKey: ctx.sessionKey, messages: [{ role: "user", content: ask }] };
+      const outs = await api.emit("before_prompt_build", askPrompt, ctx);
+      const prepend = outs.map((x) => (x && typeof x === "object" ? x.prependContext || "" : "")).filter(Boolean).join("\n");
+      const hasExpected = scenario.expected.every((fact) => prepend.includes(fact));
+      const forbiddenOk = scenario.forbidden.every((fact) => !prepend.includes(fact));
+      const hasControlledSummary = /CONTROLLED SUMMARY|current collaboration preferences/i.test(prepend);
+      assertions.randomizedCollaborationPreferenceResolved = hasExpected && forbiddenOk && hasControlledSummary;
+      if (!assertions.randomizedCollaborationPreferenceResolved) {
+        failures.push({
+          phase: "assertion",
+          error: "randomized collaboration preference resolution failed",
+          scenario,
+          forgetText,
+          prepend: prepend.slice(0, 1200),
+        });
+      }
+    } catch (e) {
+      failures.push({ phase: "assertion", error: `randomized collaboration preference scenario threw: ${String(e)}` });
+    }
+  }
   const statsDef = toolDefs.get("memory_stats");
   if (statsDef) {
     try {
@@ -525,6 +662,9 @@ try {
   if (!assertions.toolStoreCreated) failures.push({ phase: "assertion", error: "memory_store did not create a memory" });
   if (!assertions.toolRecallFound) failures.push({ phase: "assertion", error: "memory_recall did not retrieve stored memory" });
   if (!assertions.similarRecallDistinguished) failures.push({ phase: "assertion", error: "memory_recall did not distinguish similar memories" });
+  if (!assertions.randomizedCollaborationPreferenceResolved) {
+    failures.push({ phase: "assertion", error: "randomized collaboration preference scenario did not resolve" });
+  }
   if (!assertions.statsObserved) failures.push({ phase: "assertion", error: "memory_stats did not return successfully" });
   if (warnOrErrorLogs.some((l) => /Cannot find module '@lancedb\/lancedb|connection_1|failed to load LanceDB/i.test(l.msg))) {
     failures.push({ phase: "assertion", error: "LanceDB native dependency warning detected" });

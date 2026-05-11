@@ -70,6 +70,7 @@ import { buildReflectionMappedMetadata } from "./src/reflection-mapped-metadata.
 import { createMemoryCLI } from "./cli.js";
 import { isNoise } from "./src/noise-filter.js";
 import { normalizeAutoCaptureText } from "./src/auto-capture-cleanup.js";
+import type { MemoryEntry } from "./src/store.js";
 
 // Import smart extraction & lifecycle components
 import { SmartExtractor, createExtractionRateLimiter } from "./src/smart-extractor.js";
@@ -128,6 +129,7 @@ import { gateAndRankRecallForInjection } from "./src/lib/injection-semantic-gate
 import {
   formatResolvedCollaborationPreferencesBlock,
   resolveCollaborationPreferences,
+  type CollaborationPreferenceCandidate,
   type ResolvedCollaborationPreferences,
 } from "./src/lib/collaboration-preference-resolver.js";
 import { createLogger } from "./src/lib/logger.js";
@@ -1729,6 +1731,43 @@ function isCollaborationRuleText(text: string): boolean {
   );
 }
 
+function isCollaborationPreferenceMutationText(text: string): boolean {
+  const s = String(text || "");
+  if (!s.trim()) return false;
+  if (isSystemRuntimeRuleText(s)) return false;
+  const hasOrdinalMutation =
+    /(第\s*([0-9]{1,2}|[一二两兩三四五六七八九十]{1,3}|[①②③④⑤⑥⑦⑧⑨])\s*(条|條|项|項|个|個|则|則|点|點|款)|\brule\s*#?\s*[0-9]{1,2}\b|\b[0-9]{1,2}(?:st|nd|rd|th)\s+(?:rule|item|preference)\b)/i.test(s) &&
+    /(遗忘|忘记|忘掉|删掉|删除|移除|去掉|撤销|取消|不再记|不再把|不再将|作废|废弃|不再生效|失效|别再按|不要再按|不算数|不算數|forget|remove|drop|delete|discard|revoke|ignore|disable|invalidate|no longer applies)/i.test(s);
+  if (hasOrdinalMutation) return true;
+  if (!(isCollaborationRuleText(s) && hasCurrentCollaborationStateCue(s))) return false;
+  const looksStatusQuery =
+    /[?？]/.test(s) ||
+    /(是什么|哪些|哪几|多少|怎么|如何|请列出|列出|复述|说明|解释|查看|清单是什么|列表是什么|what\s+are|what\s+is|list|show|tell\s+me)/i.test(s);
+  const hasDeclarativeCue =
+    /[:：=]|[1-9一二三四五六七八九十①②③④⑤⑥⑦⑧⑨][）).、]|(已更新|更新后|更新为|改为|升级|取代|确认|后续|以后|以後|之后|之後|一律|始终|默认|默認|固定为|统一|请用|用\s+.+(格式|结构|三段)|取消|撤销|作废|废弃|不再使用|不应再|不要再|不得|禁止|latest\s+is|current\s+is|going forward|from now on|no longer applies|always|never|default(?:s)? to|prefer|use)\b/i.test(
+      s,
+    );
+  return hasDeclarativeCue && !looksStatusQuery;
+}
+
+function isLikelyCollaborationStatusQuestionText(text: string): boolean {
+  const s = normalizeLeadingUiArtifacts(String(text || ""));
+  if (!s.trim()) return false;
+  if (!isCollaborationRuleText(s)) return false;
+  return (
+    /[?？]/.test(s) ||
+    /(是什么|哪些|哪几|多少|怎么|如何|请列出|列出|复述|说明|解释|查看|清单是什么|列表是什么|还算|算数|算數|what\s+are|what\s+is|list|show|tell\s+me|how\s+should)/i.test(
+      s,
+    )
+  );
+}
+
+function hasCurrentCollaborationStateCue(text: string): boolean {
+  return /(当前|现行|仍生效|生效|有效|最新|目前|现在|已更新|更新后|改为|升级|取代|确认|后续|以后|以後|一律|始终|默认|默認|取消|撤销|作废|废弃|不再使用|不应再|不要再|不得|禁止|latest|current|active|in force|going forward|from now on|no longer applies)/i.test(
+    String(text || ""),
+  );
+}
+
 function looksLikeQuestion(text: string): boolean {
   const s = normalizeLeadingUiArtifacts(text);
   if (/[?？]/.test(s)) return true;
@@ -1785,6 +1824,11 @@ export function shouldCapture(text: string): boolean {
   }
   // Exclude obvious memory-management prompts
   if (CAPTURE_EXCLUDE_PATTERNS.some((r) => r.test(s))) return false;
+  // Collaboration preference updates/cancellations are durable factual changes
+  // even when phrased as short imperatives ("Rule 4 no longer applies").
+  // Capture them for later semantic-slot resolution; do not rewrite/delete
+  // earlier rows.
+  if (isCollaborationPreferenceMutationText(s)) return true;
   // Exclude question-like prompts (prevent capturing user questions as memories)
   if (looksLikeQuestion(s)) return false;
 
@@ -1795,6 +1839,9 @@ export function detectCategory(
   text: string,
 ): "preference" | "fact" | "decision" | "entity" | "other" {
   const lower = text.toLowerCase();
+  if (isCollaborationRuleText(text)) {
+    return "preference";
+  }
   if (
     /prefer|radši|like|love|hate|want|偏好|喜歡|喜欢|討厭|讨厌|不喜歡|不喜欢|愛用|爱用|習慣|习惯/i.test(
       lower,
@@ -2339,6 +2386,36 @@ const memoryLanceDBProPlugin = {
     }
 
     const migrator = createMigrator(store);
+
+    const buildCollaborationPreferenceMetadata = (
+      text: string,
+      ctxLike: Record<string, unknown>,
+      now = Date.now(),
+    ) =>
+      stringifySmartMetadata(
+        buildSmartMetadata(
+          { text, category: "preference", importance: 0.82, timestamp: now },
+          {
+            l0_abstract: text,
+            l1_overview: `- ${text}`,
+            l2_content: text,
+            memory_category: "preferences",
+            source_session: typeof ctxLike?.sessionKey === "string" ? ctxLike.sessionKey : "unknown",
+            source: "auto-capture",
+            state: "confirmed",
+            memory_layer: "durable",
+            confidence: 0.86,
+            valid_from: now,
+            // Keep collaboration preference rows in one temporal family for
+            // broad current-state resolution without deleting old rows.
+            fact_key: "preferences:collaboration-current",
+            canonical_id: "preferences:collaboration-current",
+            injected_count: 0,
+            bad_recall_count: 0,
+            suppressed_until_turn: 0,
+          },
+        ),
+      );
 
     // Initialize smart extraction
     let smartExtractor: SmartExtractor | null = null;
@@ -3198,29 +3275,33 @@ const memoryLanceDBProPlugin = {
                 );
               }
               if (!(existing.length > 0 && existing[0].score > 0.90)) {
+                const now = Date.now();
                 await store.store({
                   text: normalized,
                   vector,
-                  importance: 0.75,
+                  importance: isCollaborationPreferenceMutationText(normalized) ? 0.82 : 0.75,
                   category,
                   scope: defaultScope,
-                  metadata: stringifySmartMetadata(
-                    buildSmartMetadata(
-                      { text: normalized, category, importance: 0.75 },
-                      {
-                        l0_abstract: normalized,
-                        l1_overview: `- ${normalized}`,
-                        l2_content: normalized,
-                        source_session: typeof ctx?.sessionKey === "string" ? ctx.sessionKey : "unknown",
-                        source: "auto-capture",
-                        state: "confirmed",
-                        memory_layer: "working",
-                        injected_count: 0,
-                        bad_recall_count: 0,
-                        suppressed_until_turn: 0,
-                      },
+                  metadata: isCollaborationPreferenceMutationText(normalized)
+                    ? buildCollaborationPreferenceMetadata(normalized, ctx, now)
+                    : stringifySmartMetadata(
+                      buildSmartMetadata(
+                        { text: normalized, category, importance: 0.75, timestamp: now },
+                        {
+                          l0_abstract: normalized,
+                          l1_overview: `- ${normalized}`,
+                          l2_content: normalized,
+                          source_session: typeof ctx?.sessionKey === "string" ? ctx.sessionKey : "unknown",
+                          source: "auto-capture",
+                          state: "confirmed",
+                          memory_layer: "working",
+                          valid_from: now,
+                          injected_count: 0,
+                          bad_recall_count: 0,
+                          suppressed_until_turn: 0,
+                        },
+                      ),
                     ),
-                  ),
                 });
               }
             }
@@ -3636,6 +3717,36 @@ const memoryLanceDBProPlugin = {
             }
           }
 
+          const collaborationBackstopEntries: MemoryEntry[] = [];
+          if (looksLikeCurrentStateRulesQuery && collaborationPreferenceIntent) {
+            try {
+              const recent = await store.list(accessibleScopes, undefined, 500, 0);
+              for (const entry of recent) {
+                const meta = parseSmartMetadata(entry.metadata, entry);
+                if (!isMemoryActiveAt(meta)) continue;
+                if (meta.state === "archived" || meta.memory_layer === "archive") continue;
+                const hay = `${entry.text || ""}\n${meta.l0_abstract || ""}\n${meta.l1_overview || ""}\n${meta.l2_content || ""}`;
+                if (isLikelyCollaborationStatusQuestionText(String(meta.l0_abstract || entry.text || ""))) continue;
+                if (!(isCollaborationPreferenceMutationText(hay) || (isCollaborationRuleText(hay) && hasCurrentCollaborationStateCue(hay)))) continue;
+                collaborationBackstopEntries.push(entry);
+              }
+              if (collaborationBackstopEntries.length > 0) {
+                const seen = new Set(results.map((r) => String(r?.entry?.id || "")));
+                for (const entry of collaborationBackstopEntries) {
+                  if (seen.has(entry.id)) continue;
+                  seen.add(entry.id);
+                  results.push({
+                    entry,
+                    score: 0.99,
+                    sources: { bm25: { score: 0.99, rank: 1 }, fused: { score: 0.99 } },
+                  });
+                }
+              }
+            } catch (err) {
+              api.logger.warn(`memory-lancedb-pro: collaboration current-state scan failed: ${String(err)}`);
+            }
+          }
+
           if (results.length === 0) {
             return;
           }
@@ -3733,7 +3844,7 @@ const memoryLanceDBProPlugin = {
             if (/^(请|麻烦|能否|可以|帮我|帮忙|给我)/.test(s) && /(复述|说明|解释|告诉我|是什么|多少|怎么|为何|为什么|列出|做|写|生成|安排|排期|规划|規劃|设计|設計|整理)/.test(s)) {
               return true;
             }
-            if (isAppliedCollaborationPreferenceIntentText(s)) return true;
+            if (isAppliedCollaborationPreferenceIntentText(s) && !isCollaborationPreferenceMutationText(s)) return true;
             if (/(先回复|给我一个|请复述|请列出|请说明|请解释|请告诉我|列出当前|说明当前)/.test(s)) {
               return true;
             }
@@ -3785,8 +3896,36 @@ const memoryLanceDBProPlugin = {
             }
             return true;
           });
+          const collaborationResolutionRows: any[] =
+            currentCollaborationPreferenceIntent
+              ? (() => {
+                const byId = new Map<string, any>();
+                const addRow = (entry: MemoryEntry, score = 0.995) => {
+                  const id = String(entry?.id || "");
+                  if (!id || byId.has(id)) return;
+                  const meta = parseSmartMetadata(entry.metadata, entry);
+                  if (!isMemoryActiveAt(meta)) return;
+                  if (meta.state === "archived" || meta.memory_layer === "archive") return;
+                  const hay = `${entry.text || ""}\n${meta.l0_abstract || ""}\n${meta.l1_overview || ""}\n${meta.l2_content || ""}`;
+                  if (isRecallNoiseArtifact(hay)) return;
+                  // Current-state collaboration resolution needs both snapshots
+                  // and semantic mutation rows, but must not absorb rows that
+                  // are merely previous user questions about the state.
+                  if (isLikelyUserQueryMemory(String(meta.l0_abstract || entry.text || ""))) return;
+                  if (!(isCollaborationPreferenceMutationText(hay) || (isCollaborationRuleText(hay) && hasCurrentCollaborationStateCue(hay)))) return;
+                  byId.set(id, {
+                    entry,
+                    score,
+                    sources: { bm25: { score, rank: 1 }, fused: { score } },
+                  });
+                };
+                for (const r of recallInjectionEligible) addRow(r.entry, typeof r.score === "number" ? r.score : 0.99);
+                for (const entry of collaborationBackstopEntries) addRow(entry, 0.995);
+                return [...byId.values()];
+              })()
+              : [];
 
-          if (recallInjectionEligible.length === 0) {
+          if (recallInjectionEligible.length === 0 && collaborationResolutionRows.length === 0) {
             api.logger.info?.(
               `memory-lancedb-pro: auto-recall skipped after injection eligibility filters (hits=${results.length}, dedupFiltered=${dedupFilteredCount}, internalFiltered=${internalFilteredCount}, noisyArtifactFiltered=${noisyArtifactFilteredCount}, queryLikeFiltered=${queryLikeFilteredCount}, suppressedFiltered=${suppressedFilteredCount})`,
             );
@@ -3813,8 +3952,8 @@ const memoryLanceDBProPlugin = {
               if (isLikelyUserQueryMemory(s)) return Number.NEGATIVE_INFINITY;
               if (isSystemRuntimeRuleText(s) && !isCollaborationRuleText(s)) return Number.NEGATIVE_INFINITY;
               const hasRuleCue = /(协作|協作|约定|約定|约束|約束|规则|規則|原则|原則|偏好|默认|默認|长期|長期|后续|後續|以后|以後|要求|限制|格式|风格|語言|语言|时区|時區|timezone|输出|輸出|方案|计划|計劃|排期|口径|口徑|代号|代號|标签|標籤|preference|rule|policy|constraint|default|format|plan|schedule)/i.test(s);
-              if (!hasRuleCue) return Number.NEGATIVE_INFINITY;
-              const currentCue = /(当前.{0,12}(协作|協作|约定|約定|约束|約束|规则|規則|偏好|生效|有效)|现行|仍生效|生效|有效|已更新|更新后|更新|改为|升级|取代|取消|遗忘|忘记|不再记|删掉|删除|移除|不再使用|不应再|仅保留新值|latest|current|active|in force)/i.test(s) ? 1 : 0;
+              if (!hasRuleCue && !isCollaborationPreferenceMutationText(s)) return Number.NEGATIVE_INFINITY;
+              const currentCue = /(当前.{0,12}(协作|協作|约定|約定|约束|約束|规则|規則|偏好|生效|有效)|现行|仍生效|生效|有效|已更新|更新后|更新|改为|升级|取代|取消|撤销|遗忘|忘记|不再记|删掉|删除|移除|去掉|作废|废弃|不再使用|不应再|不要再|别再按|不要再按|不算数|不算數|仅保留新值|latest|current|active|in force|going forward|from now on|no longer applies|forget|remove|drop|delete|discard|revoke|disable|invalidate)/i.test(s) ? 1 : 0;
               const staleCue = (/\b20\d{2}-\d{2}-\d{2}\b/.test(s) || /(确立|established)/i.test(s)) && currentCue === 0 ? 1 : 0;
               const invalidatedOnly = /(已失效|已过期|废弃|作废|obsolete|deprecated)/i.test(s) && !/(取消|不再使用|不应再|无|不存在|取代)/i.test(s) ? 1 : 0;
               if (invalidatedOnly) return Number.NEGATIVE_INFINITY;
@@ -3832,7 +3971,9 @@ const memoryLanceDBProPlugin = {
             // Global backstop: probe recent memory rows directly (not retrieval-ranked) so
             // arbitrarily phrased "current effective rule" queries can recover latest entries.
             try {
-              const recent = await store.list(accessibleScopes, undefined, 120, 0);
+              const recent = collaborationBackstopEntries.length > 0
+                ? collaborationBackstopEntries
+                : await store.list(accessibleScopes, undefined, 500, 0);
               const forcedRows = recent
                 .filter((entry) => {
                   const meta = parseSmartMetadata(entry.metadata, entry);
@@ -3840,6 +3981,9 @@ const memoryLanceDBProPlugin = {
                   // already marked inactive/archived by other workflows.
                   if (!isMemoryActiveAt(meta)) return false;
                   if (meta.state === "archived" || meta.memory_layer === "archive") return false;
+                  const text = `${entry.text || ""}\n${meta.l0_abstract || ""}\n${meta.l1_overview || ""}\n${meta.l2_content || ""}`;
+                  if (isLikelyUserQueryMemory(String(meta.l0_abstract || entry.text || ""))) return false;
+                  if (!(isCollaborationPreferenceMutationText(text) || (isCollaborationRuleText(text) && hasCurrentCollaborationStateCue(text)))) return false;
                   return true;
                 })
                 .map((entry) => {
@@ -3868,6 +4012,16 @@ const memoryLanceDBProPlugin = {
               // ignore backstop failures
             }
           }
+          if (currentCollaborationPreferenceIntent && collaborationResolutionRows.length > 0) {
+            const seen = new Set(semanticRecall.map((r) => String(r?.entry?.id || "")));
+            for (const row of collaborationResolutionRows) {
+              const id = String(row?.entry?.id || "");
+              if (!id || seen.has(id)) continue;
+              seen.add(id);
+              semanticRecall.push(row);
+            }
+          }
+
           if (semanticRecall.length === 0) {
             api.logger.info?.(
               `memory-lancedb-pro: auto-recall skipped after semantic alignment (eligible=${recallInjectionEligible.length})`,
@@ -3891,14 +4045,19 @@ const memoryLanceDBProPlugin = {
               }
               const meta = parseSmartMetadata(r.entry.metadata, r.entry);
               const factKeyRaw = (meta.fact_key || "").trim().toLowerCase();
-              if (factKeyRaw && seenFactKeys.has(factKeyRaw)) {
+              const candidateText = `${r.entry.text || ""}\n${meta.l0_abstract || ""}\n${meta.l1_overview || ""}\n${meta.l2_content || ""}`;
+              const keepTemporalCollaborationHistory =
+                isCurrentStateRuleIntent(recallQuery) &&
+                collaborationPreferenceIntent &&
+                isCollaborationPreferenceMutationText(candidateText);
+              if (factKeyRaw && seenFactKeys.has(factKeyRaw) && !keepTemporalCollaborationHistory) {
                 uniqueFilteredCount++;
                 continue;
               }
               const sourceText = (meta.l0_abstract || r.entry.text || "").trim();
               const tokenSet = tokenizeRecallText(sourceText);
               let semanticDup = false;
-              if (tokenSet.size >= uniqueCfg.minTokenOverlap) {
+              if (!keepTemporalCollaborationHistory && tokenSet.size >= uniqueCfg.minTokenOverlap) {
                 for (const kept of keptTokenSets) {
                   const overlap = tokenJaccard(tokenSet, kept);
                   if (overlap >= uniqueCfg.semanticDedupeThreshold) {
@@ -3918,6 +4077,15 @@ const memoryLanceDBProPlugin = {
             }
             return out;
           })();
+          if (currentCollaborationPreferenceIntent && collaborationResolutionRows.length > 0) {
+            const seen = new Set(uniqueEligible.map((r) => String(r?.entry?.id || "")));
+            for (const row of collaborationResolutionRows) {
+              const id = String(row?.entry?.id || "");
+              if (!id || seen.has(id)) continue;
+              seen.add(id);
+              uniqueEligible.push(row);
+            }
+          }
 
           if (uniqueEligible.length === 0) {
             api.logger.info?.(
@@ -3974,6 +4142,55 @@ const memoryLanceDBProPlugin = {
               semanticMatch,
             };
           });
+          const collaborationResolutionCandidates: CollaborationPreferenceCandidate[] =
+            currentCollaborationPreferenceIntent
+              ? (() => {
+                const byId = new Map<string, CollaborationPreferenceCandidate>();
+                const addFromEntry = (entry: MemoryEntry) => {
+                  const id = String(entry?.id || "");
+                  if (!id || byId.has(id)) return;
+                  const meta = parseSmartMetadata(entry.metadata, entry);
+                  if (!isMemoryActiveAt(meta)) return;
+                  if (meta.state === "archived" || meta.memory_layer === "archive") return;
+                  const fullText = [
+                    entry.text || "",
+                    meta.l0_abstract || "",
+                    meta.l1_overview || "",
+                    meta.l2_content || "",
+                  ].join("\n");
+                  if (isRecallNoiseArtifact(fullText)) return;
+                  if (isLikelyUserQueryMemory(String(meta.l0_abstract || entry.text || ""))) return;
+                  if (!(isCollaborationPreferenceMutationText(fullText) || (isCollaborationRuleText(fullText) && hasCurrentCollaborationStateCue(fullText)))) return;
+                  byId.set(id, {
+                    id,
+                    text: fullText,
+                    timestamp: typeof meta.valid_from === "number" ? meta.valid_from : entry.timestamp,
+                    validFrom: typeof meta.valid_from === "number" ? meta.valid_from : entry.timestamp,
+                    eventAt: meta.event_at as number | string | undefined,
+                  });
+                };
+                for (const row of collaborationResolutionRows) addFromEntry(row.entry);
+                for (const candidate of preBudgetCandidates) {
+                  const fullText = [
+                    candidate.rawText || "",
+                    candidate.summary || "",
+                    candidate.meta.l0_abstract || "",
+                    candidate.meta.l1_overview || "",
+                    candidate.meta.l2_content || "",
+                  ].join("\n");
+                  if (isLikelyUserQueryMemory(String(candidate.meta.l0_abstract || candidate.rawText || ""))) continue;
+                  if (!(isCollaborationPreferenceMutationText(fullText) || (isCollaborationRuleText(fullText) && hasCurrentCollaborationStateCue(fullText)))) continue;
+                  byId.set(candidate.id, {
+                    id: candidate.id,
+                    text: fullText,
+                    timestamp: typeof candidate.meta.valid_from === "number" ? candidate.meta.valid_from : undefined,
+                    validFrom: typeof candidate.meta.valid_from === "number" ? candidate.meta.valid_from : undefined,
+                    eventAt: candidate.meta.event_at as number | string | undefined,
+                  });
+                }
+                return [...byId.values()];
+              })()
+              : [];
           const resolveCurrentCollaborationPreferencesFromCandidates = (
             candidates: typeof preBudgetCandidates,
           ): ResolvedCollaborationPreferences =>
@@ -4030,10 +4247,12 @@ const memoryLanceDBProPlugin = {
           let orderedPreBudgetCandidates = preBudgetCandidates;
           let resolvedCollaborationPreferences: ResolvedCollaborationPreferences | undefined;
           if (isCurrentStateRuleIntent(recallQuery) && collaborationPreferenceIntent) {
-            resolvedCollaborationPreferences = resolveCurrentCollaborationPreferencesFromCandidates(preBudgetCandidates);
+            resolvedCollaborationPreferences = collaborationResolutionCandidates.length > 0
+              ? resolveCollaborationPreferences(collaborationResolutionCandidates)
+              : resolveCurrentCollaborationPreferencesFromCandidates(preBudgetCandidates);
             const candidateSourceById = new Map(preBudgetCandidates.map((candidate) => [candidate.id, candidate]));
             const resolvedCurrentIds = new Set(
-              resolvedCollaborationPreferences.active
+              [...resolvedCollaborationPreferences.active, ...resolvedCollaborationPreferences.inactive]
                 .map((state) => state.sourceId)
                 .filter((id): id is string => typeof id === "string" && id.length > 0),
             );
@@ -4669,33 +4888,35 @@ const memoryLanceDBProPlugin = {
             await store.store({
               text,
               vector,
-              importance: 0.7,
+              importance: isCollaborationPreferenceMutationText(text) ? 0.82 : 0.7,
               category,
               scope: defaultScope,
-              metadata: stringifySmartMetadata(
-                buildSmartMetadata(
-                  {
-                    text,
-                    category,
-                    importance: 0.7,
-                  },
-                  {
-                    l0_abstract: text,
-                    l1_overview: `- ${text}`,
-                    l2_content: text,
-                    source_session: (event as any).sessionKey || "unknown",
-                    source: "auto-capture",
-                    // Vetted-by-pipeline default: confirmed + working. (Historically
-                    // auto-recall also required confirmed; retrieval-based injection
-                    // is broader now, but pending caused poor UX for fresh captures.)
-                    state: "confirmed",
-                    memory_layer: "working",
-                    injected_count: 0,
-                    bad_recall_count: 0,
-                    suppressed_until_turn: 0,
-                  },
+              metadata: isCollaborationPreferenceMutationText(text)
+                ? buildCollaborationPreferenceMetadata(text, event as Record<string, unknown>)
+                : stringifySmartMetadata(
+                  buildSmartMetadata(
+                    {
+                      text,
+                      category,
+                      importance: 0.7,
+                    },
+                    {
+                      l0_abstract: text,
+                      l1_overview: `- ${text}`,
+                      l2_content: text,
+                      source_session: (event as any).sessionKey || "unknown",
+                      source: "auto-capture",
+                      // Vetted-by-pipeline default: confirmed + working. (Historically
+                      // auto-recall also required confirmed; retrieval-based injection
+                      // is broader now, but pending caused poor UX for fresh captures.)
+                      state: "confirmed",
+                      memory_layer: "working",
+                      injected_count: 0,
+                      bad_recall_count: 0,
+                      suppressed_until_turn: 0,
+                    },
+                  ),
                 ),
-              ),
             });
             stored++;
 
