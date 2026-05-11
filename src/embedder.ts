@@ -721,10 +721,11 @@ export class Embedder {
     }
 
     // Task hint: field name and optional value translation are provider-defined.
-    if (this._capabilities.taskField && task) {
+    const taskField = this._capabilities.taskField;
+    if (taskField && task) {
       const cap = this._capabilities;
       const value = cap.taskValueMap?.[task] ?? task;
-      payload[cap.taskField] = value;
+      payload[taskField] = value;
     }
 
     // Output dimension: field name is provider-defined.
@@ -886,7 +887,7 @@ export class Embedder {
       const results: number[][] = new Array(texts.length);
 
       // Fill in embeddings for valid texts
-      response.data.forEach((item, idx) => {
+      response.data.forEach((item: { embedding?: unknown }, idx: number) => {
         const originalIndex = validIndices[idx];
         const embedding = item.embedding as number[];
 

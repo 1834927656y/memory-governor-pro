@@ -54,8 +54,6 @@
     "governance": 0.3
   },
   "runtimeVectorOnlyRecall": true,
-  "rotateOnAgentEnd": true,
-  "rotateOnAgentEndCooldownMs": 120000,
   "lancedb": {
     "dbPath": "memory/lancedb-governor/{AGENT_ID}",
     "tableName": "memories",

@@ -1,4 +1,4 @@
-import type { MemoryEntry, MemorySearchResult } from "./store.js";
+import type { MemoryEntry, MemorySearchResult, NewMemoryEntry } from "./store.js";
 import {
   extractInjectableReflectionSliceItems,
   extractInjectableReflectionSlices,
@@ -34,7 +34,7 @@ type ReflectionErrorSignalLike = {
 
 interface ReflectionStorePayload {
   text: string;
-  metadata: Record<string, unknown>;
+  metadata: Record<string, unknown> | object;
   kind: ReflectionStoreKind;
 }
 
@@ -175,7 +175,7 @@ interface ReflectionStoreDeps {
     minScore?: number,
     scopeFilter?: string[]
   ) => Promise<MemorySearchResult[]>;
-  store: (entry: Omit<MemoryEntry, "id" | "timestamp">) => Promise<MemoryEntry>;
+  store: (entry: NewMemoryEntry) => Promise<MemoryEntry>;
 }
 
 interface StoreReflectionToLanceDBParams extends BuildReflectionStorePayloadsParams, ReflectionStoreDeps {

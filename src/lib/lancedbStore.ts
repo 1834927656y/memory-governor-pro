@@ -209,6 +209,18 @@ function belongsToAgent(row: Record<string, unknown>, agentId: string): boolean 
   return rid === agentId || scope === `governor:${agentId}`;
 }
 
+function isNoisyGovernanceRow(row: Record<string, unknown>): boolean {
+  const s = String(row.summary || row.text || "").trim();
+  if (!s) return true;
+  if (/^found\s+\d+\s+(candidate|candidates|memories)\b/i.test(s)) return true;
+  if (/specify\s+memoryid\b/i.test(s)) return true;
+  if (/^undefined\b/i.test(s)) return true;
+  if (/<relevant-memories>|<governance-memories>|untrusted data/i.test(s)) return true;
+  // Drop stale context-flush recovery notices from governance recall to avoid looped pollution.
+  if (/context-flush-resume/i.test(s) && /(已过期的会话|原始任务上下文已丢失|虚警)/i.test(s)) return true;
+  return false;
+}
+
 export async function queryMemories(
   cfg: { dbPath: string; tableName: string; embeddingDimensions: number },
   queryText: string,
@@ -223,6 +235,7 @@ export async function queryMemories(
       const normalized = rs.map((r: unknown) => normalizeGovernorRow(r));
       return normalized
         .filter((r: Record<string, unknown>) => belongsToAgent(r, agentId))
+        .filter((r: Record<string, unknown>) => !isNoisyGovernanceRow(r))
         .slice(0, topK);
     } catch {
       // Some older or externally created governor tables may miss a compatible
@@ -231,6 +244,7 @@ export async function queryMemories(
       return rows
         .map((r: any) => normalizeGovernorRow(r))
         .filter((r: any) => belongsToAgent(r, agentId))
+        .filter((r: any) => !isNoisyGovernanceRow(r))
         .map((r: any) => ({ r, s: overlapScore(queryText, String(r.summary || "")) }))
         .sort((a: any, b: any) => b.s - a.s)
         .slice(0, topK)
@@ -245,6 +259,7 @@ export async function queryMemories(
   return rows
     .map((r: any) => normalizeGovernorRow(r))
     .filter((r) => belongsToAgent(r, agentId))
+    .filter((r) => !isNoisyGovernanceRow(r))
     .map((r: any) => ({ r, s: overlapScore(queryText, String(r.summary || "")) }))
     .sort((a: any, b: any) => b.s - a.s)
     .slice(0, topK)

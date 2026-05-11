@@ -69,6 +69,10 @@ export function stripAutoCaptureInjectedPrefix(role: string, text: string): stri
 
   let normalized = text.trim();
   normalized = normalized.replace(/<relevant-memories>\s*[\s\S]*?<\/relevant-memories>\s*/gi, "");
+  normalized = normalized.replace(/<governance-memories>\s*[\s\S]*?<\/governance-memories>\s*/gi, "");
+  normalized = normalized.replace(/<self-improvement-reminder>\s*[\s\S]*?<\/self-improvement-reminder>\s*/gi, "");
+  normalized = normalized.replace(/<self-improvement-rules>\s*[\s\S]*?<\/self-improvement-rules>\s*/gi, "");
+  normalized = normalized.replace(/<context-flush-resume>\s*[\s\S]*?<\/context-flush-resume>\s*/gi, "");
   normalized = normalized.replace(
     /\[UNTRUSTED DATA[^\n]*\][\s\S]*?\[END UNTRUSTED DATA\]\s*/gi,
     "",

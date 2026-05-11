@@ -852,6 +852,15 @@
           "query": { "type": "string", "default": "近期决策与硬约束" }
         }
       },
+      "injectionTrace": {
+        "type": "object",
+        "additionalProperties": false,
+        "description": "Optional merged prompt injection trace logging. When enabled, writes merged prepend snapshots to a local directory for debugging injection behavior.",
+        "properties": {
+          "enabled": { "type": "boolean", "default": false },
+          "dir": { "type": "string", "description": "Optional output directory. If omitted, uses skillRoot/state/injection-trace." }
+        }
+      },
       "uniqueInjection": {
         "type": "object",
         "additionalProperties": false,

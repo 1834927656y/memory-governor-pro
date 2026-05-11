@@ -19,11 +19,22 @@ function listJsonl(root) {
 }
 
 function main() {
-  const home = process.env.OPENCLAW_HOME
-    ? path.resolve(process.env.OPENCLAW_HOME)
-    : path.resolve(path.join(process.env.USERPROFILE || process.env.HOME || ".", ".openclaw"));
+  const argv = process.argv.slice(2);
+  const strict = argv.includes("--strict");
+  const ci = argv.indexOf("--config");
+  let home;
+  let openclawConfigPath;
 
-  const openclawConfigPath = path.join(home, "openclaw.json");
+  if (ci >= 0 && typeof argv[ci + 1] === "string" && argv[ci + 1].trim()) {
+    openclawConfigPath = path.resolve(argv[ci + 1].trim());
+    home = path.dirname(openclawConfigPath);
+  } else {
+    home = process.env.OPENCLAW_HOME
+      ? path.resolve(process.env.OPENCLAW_HOME)
+      : path.resolve(path.join(process.env.USERPROFILE || process.env.HOME || ".", ".openclaw"));
+    openclawConfigPath = path.join(home, "openclaw.json");
+  }
+
   const cfg = readJsonSafe(openclawConfigPath, {});
   const pluginCfg =
     cfg?.plugins?.entries?.["memory-lancedb-pro"]?.config ||
@@ -31,6 +42,7 @@ function main() {
 
   const report = {
     openclawConfigPath,
+    homeRoot: home,
     checks: [],
     warnings: [],
   };
@@ -56,8 +68,12 @@ function main() {
     const files = listJsonl(sessionsRoot);
     if (files.length === 1) {
       report.checks.push(`[${agentId}] single active jsonl: ${files[0]}`);
+    } else if (files.length === 0) {
+      report.warnings.push(`[${agentId}] no jsonl under sessions (new agent or empty dir)`);
     } else {
-      report.warnings.push(`[${agentId}] expected 1 active jsonl, got ${files.length}`);
+      report.warnings.push(
+        `[${agentId}] multiple jsonl (${files.length}) — common with parallel chats; not a plugin fault`,
+      );
     }
     const sessionsJson = path.join(sessionsRoot, "sessions.json");
     const store = readJsonSafe(sessionsJson, {});
@@ -74,6 +90,9 @@ function main() {
   }
 
   console.log(JSON.stringify(report, null, 2));
+  if (strict && report.warnings.length > 0) {
+    process.exitCode = 1;
+  }
 }
 
 main();

@@ -24,7 +24,7 @@ export interface ReflectionEventMetadata {
 export interface ReflectionEventPayload {
   kind: "event";
   text: string;
-  metadata: ReflectionEventMetadata;
+  metadata: ReflectionEventMetadata | Record<string, unknown>;
 }
 
 export interface BuildReflectionEventPayloadParams {

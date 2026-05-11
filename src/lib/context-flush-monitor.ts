@@ -46,6 +46,72 @@ function resolveStateHomeFromConfig(openclawConfigPath?: string): string {
   return resolveOpenClawHomeForMonitor();
 }
 
+function uniqueStrings(list: string[]): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const x of list) {
+    const v = (x || "").trim();
+    if (!v) continue;
+    const key = path.normalize(v);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(key);
+  }
+  return out;
+}
+
+function candidateStateHomes(openclawConfigPath?: string): string[] {
+  const homes: string[] = [];
+  const fromCfg = resolveStateHomeFromConfig(openclawConfigPath);
+  homes.push(fromCfg);
+  const fromEnvHome = process.env.OPENCLAW_HOME?.trim();
+  if (fromEnvHome) homes.push(path.resolve(fromEnvHome));
+  const fromEnvCfg = process.env.OPENCLAW_CONFIG_PATH?.trim();
+  if (fromEnvCfg) homes.push(path.resolve(path.dirname(fromEnvCfg)));
+  // In service-mode, cwd is often the real OPENCLAW_HOME.
+  try {
+    homes.push(process.cwd());
+  } catch {
+    // ignore
+  }
+  homes.push(resolveOpenClawHomeForMonitor());
+  return uniqueStrings(homes);
+}
+
+function listSessionJsonlFiles(home: string, agentId: string): string[] {
+  const sessionsRoot = path.join(home, "agents", agentId, "sessions");
+  if (!fs.existsSync(sessionsRoot)) return [];
+  let names: string[] = [];
+  try {
+    names = fs.readdirSync(sessionsRoot);
+  } catch {
+    return [];
+  }
+  return names
+    .filter((f) => f.endsWith(".jsonl"))
+    .filter((f) => !f.includes(".jsonl.reset.") && !f.includes(".jsonl.deleted."));
+}
+
+function hasSessionsIndex(home: string, agentId: string): boolean {
+  const p = path.join(home, "agents", agentId, "sessions", "sessions.json");
+  return fs.existsSync(p);
+}
+
+function resolveSessionPathMultiHome(
+  agentId: string,
+  sessionId: string,
+  openclawConfigPath?: string,
+): string | undefined {
+  const cleanAgentId = agentId.trim() || "main";
+  const cleanSessionId = sessionId.trim();
+  if (!cleanSessionId) return undefined;
+  for (const home of candidateStateHomes(openclawConfigPath)) {
+    const p = path.join(home, "agents", cleanAgentId, "sessions", `${cleanSessionId}.jsonl`);
+    if (fs.existsSync(p)) return p;
+  }
+  return undefined;
+}
+
 function discoverAgentIds(openclawConfigPath: string): string[] {
   const cfg = readJson<Record<string, unknown>>(openclawConfigPath, {});
   const list = (cfg.agents as { list?: Array<{ id?: string }> } | undefined)?.list;
@@ -87,9 +153,8 @@ export function collectSessionRuntimeContext(
   const cleanAgentId = agentId.trim() || "main";
   const cleanSessionId = sessionId.trim();
   if (!cleanSessionId) return { sessionId: "" };
-  const home = resolveStateHomeFromConfig(openclawConfigPath);
-  const sessionPath = path.join(home, "agents", cleanAgentId, "sessions", `${cleanSessionId}.jsonl`);
-  if (!fs.existsSync(sessionPath)) {
+  const sessionPath = resolveSessionPathMultiHome(cleanAgentId, cleanSessionId, openclawConfigPath);
+  if (!sessionPath) {
     return { sessionId: cleanSessionId };
   }
   try {
@@ -142,15 +207,36 @@ export function collectAllSessionPressure(
   openclawConfigPath: string,
   contextWindowTokens: number,
 ): SessionPressureSample[] {
-  const home = resolveStateHomeFromConfig(openclawConfigPath);
   const samples: SessionPressureSample[] = [];
   for (const agentId of discoverAgentIds(openclawConfigPath)) {
-    const sessionsRoot = path.join(home, "agents", agentId, "sessions");
-    if (!fs.existsSync(sessionsRoot)) continue;
-    for (const file of fs.readdirSync(sessionsRoot)) {
-      if (!file.endsWith(".jsonl")) continue;
-      /* reset / deleted 归档为只读历史，不计入上下文压力（与 jsonlSessions 语义对齐） */
-      if (file.includes(".jsonl.reset.") || file.includes(".jsonl.deleted.")) continue;
+    // If openclawConfigPath resolves to a wrong home (env mismatch), scans can get stuck on
+    // non-existent sessionIds. Pick the home that actually contains the most session files.
+    const homes = candidateStateHomes(openclawConfigPath);
+    let bestHome = homes[0];
+    let bestCount = -1;
+    for (const h of homes) {
+      // Prefer homes that have a real sessions index for this agent.
+      if (!hasSessionsIndex(h, agentId)) continue;
+      const c = listSessionJsonlFiles(h, agentId).length;
+      if (c > bestCount) {
+        bestCount = c;
+        bestHome = h;
+      }
+    }
+    // Fallback: if none had sessions.json, fall back to max jsonl count.
+    if (bestCount < 0) {
+      for (const h of homes) {
+        const c = listSessionJsonlFiles(h, agentId).length;
+        if (c > bestCount) {
+          bestCount = c;
+          bestHome = h;
+        }
+      }
+    }
+    const files = listSessionJsonlFiles(bestHome, agentId);
+    if (files.length === 0) continue;
+    const sessionsRoot = path.join(bestHome, "agents", agentId, "sessions");
+    for (const file of files) {
       const full = path.join(sessionsRoot, file);
       let bytes = 0;
       try {

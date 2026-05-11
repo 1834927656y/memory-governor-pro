@@ -558,7 +558,7 @@ export class SmartExtractor {
             dedupResult.matchId,
             sessionKey,
             targetScope,
-            scopeFilter,
+            scopeFilter ?? [targetScope],
             admission?.audit,
           );
           stats.created++;
@@ -571,7 +571,7 @@ export class SmartExtractor {
 
       case "support":
         if (dedupResult.matchId) {
-          await this.handleSupport(dedupResult.matchId, { session: sessionKey, timestamp: Date.now() }, dedupResult.reason, dedupResult.contextLabel, scopeFilter, admission?.audit);
+          await this.handleSupport(dedupResult.matchId, { session: sessionKey, timestamp: Date.now() }, dedupResult.reason, dedupResult.contextLabel, scopeFilter ?? [targetScope], admission?.audit);
           stats.supported = (stats.supported ?? 0) + 1;
         } else {
           await this.storeCandidate(candidate, vector, sessionKey, targetScope, admission?.audit);
@@ -581,7 +581,7 @@ export class SmartExtractor {
 
       case "contextualize":
         if (dedupResult.matchId) {
-          await this.handleContextualize(candidate, vector, dedupResult.matchId, sessionKey, targetScope, scopeFilter, dedupResult.contextLabel, admission?.audit);
+          await this.handleContextualize(candidate, vector, dedupResult.matchId, sessionKey, targetScope, scopeFilter ?? [targetScope], dedupResult.contextLabel, admission?.audit);
           stats.created++;
         } else {
           await this.storeCandidate(candidate, vector, sessionKey, targetScope, admission?.audit);
@@ -601,13 +601,13 @@ export class SmartExtractor {
               dedupResult.matchId,
               sessionKey,
               targetScope,
-              scopeFilter,
+              scopeFilter ?? [targetScope],
               admission?.audit,
             );
             stats.created++;
             stats.superseded = (stats.superseded ?? 0) + 1;
           } else {
-            await this.handleContradict(candidate, vector, dedupResult.matchId, sessionKey, targetScope, scopeFilter, dedupResult.contextLabel, admission?.audit);
+            await this.handleContradict(candidate, vector, dedupResult.matchId, sessionKey, targetScope, scopeFilter ?? [targetScope], dedupResult.contextLabel, admission?.audit);
             stats.created++;
           }
         } else {
@@ -699,6 +699,7 @@ export class SmartExtractor {
         decision: string;
         reason: string;
         match_index?: number;
+        context_label?: string;
       }>(prompt, "dedup-decision");
 
       if (!data) {
@@ -741,7 +742,7 @@ export class SmartExtractor {
         decision,
         reason: data.reason ?? "",
         matchId: ["merge", "support", "contextualize", "contradict", "supersede"].includes(decision) ? matchEntry?.entry.id : undefined,
-        contextLabel: typeof (data as any).context_label === "string" ? (data as any).context_label : undefined,
+        contextLabel: typeof data.context_label === "string" ? data.context_label : undefined,
       };
     } catch (err) {
       this.log(

@@ -35,8 +35,9 @@ const skillRoot = path.resolve(__dirname, "..");
 const configPath = path.join(skillRoot, "config.json");
 const rawConfig = readJson<Config | null>(configPath, null);
 if (!rawConfig) throw new Error(`未找到配置文件: ${configPath}`);
+const rawConfigValue: Config = rawConfig;
 
-const config = resolveRuntimeConfig(rawConfig, { skillRoot });
+const config = resolveRuntimeConfig(rawConfigValue, { skillRoot });
 ensureDir(config.stateDir);
 
 const program = new Command();
@@ -160,7 +161,7 @@ program.command("build-pack").requiredOption("--query <text>").action(async (opt
 
 function configForAgent(agentFlag: string | undefined): Config {
   const id = typeof agentFlag === "string" && agentFlag.trim() ? agentFlag.trim() : undefined;
-  return resolveRuntimeConfig(rawConfig, { envAgentId: id, skillRoot });
+  return resolveRuntimeConfig(rawConfigValue, { envAgentId: id, skillRoot });
 }
 
 program
@@ -264,7 +265,7 @@ program
     const datesOverride = resolveRollbackDatesFromOpts(
       typeof opts.dates === "string" ? opts.dates : undefined,
     );
-    const baseResolved = resolveRuntimeConfig(rawConfig, { skillRoot });
+    const baseResolved = resolveRuntimeConfig(rawConfigValue, { skillRoot });
     let agentIds: string[];
     if (opts.allGovernorAgents === true) {
       agentIds = readGovernorEnabledAgentIds(baseResolved.openclawConfigPath);
@@ -356,7 +357,7 @@ program
   )
   .option("--openclaw-bin <path>", "openclaw 可执行文件", "openclaw")
   .action(async (opts) => {
-    const baseResolved = resolveRuntimeConfig(rawConfig, { skillRoot });
+    const baseResolved = resolveRuntimeConfig(rawConfigValue, { skillRoot });
     let agentIds: string[];
     if (opts.allGovernorAgents === true) {
       agentIds = readGovernorEnabledAgentIds(baseResolved.openclawConfigPath);
@@ -462,4 +463,3 @@ program.parseAsync(process.argv).catch((err) => {
   console.error(err?.stack || String(err));
   process.exitCode = 1;
 });
-

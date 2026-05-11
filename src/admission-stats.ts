@@ -185,7 +185,21 @@ export function getAdmittedDecisionTimestamp(
 export function getObservedAdmissionCategory(
   entry: AdmissionAuditedMemoryLike,
 ): string {
-  return parseSmartMetadata(entry.metadata, entry).memory_category || entry.category || "patterns";
+  return parseSmartMetadata(entry.metadata, { ...entry, category: mapAdmissionCategory(entry.category) }).memory_category || mapAdmissionCategory(entry.category) || "patterns";
+}
+
+function mapAdmissionCategory(category?: string): "preference" | "fact" | "decision" | "entity" | "other" | "reflection" | undefined {
+  switch (category) {
+    case "preference":
+    case "fact":
+    case "decision":
+    case "entity":
+    case "other":
+    case "reflection":
+      return category;
+    default:
+      return undefined;
+  }
 }
 
 export function buildAdmissionCategoryBreakdown(
@@ -196,8 +210,9 @@ export function buildAdmissionCategoryBreakdown(
   const rejectedCounts: Record<string, number> = {};
 
   if (admittedCategories) {
+    const counts = admittedCounts ?? {};
     for (const category of admittedCategories) {
-      admittedCounts[category] = (admittedCounts[category] ?? 0) + 1;
+      counts[category] = (counts[category] ?? 0) + 1;
     }
   }
 

@@ -5,6 +5,14 @@
 
 export type InjectionPart = { source: string; text: string };
 
+/** Dedupe only within the same group so self-improvement boilerplate does not strip auto-recall / governance blocks. */
+function dedupeGroupForSource(source: string): string {
+  const s = (source || "").toLowerCase();
+  if (s.includes("self-improvement")) return "si";
+  if (s.includes("governance-lancedb") || s.includes("context-flush")) return "gov";
+  return "memory";
+}
+
 function normalizeForDedupe(text: string): string {
   return text
     .toLowerCase()
@@ -54,19 +62,21 @@ export function mergeAndDedupeInjectionParts(
   }
 
   const kept: string[] = [];
-  const keptTokenSets: Set<string>[] = [];
+  const keptMeta: { tokens: Set<string>; group: string }[] = [];
   let droppedParagraphs = 0;
 
-  for (const { paragraph } of ordered) {
+  for (const { source, paragraph } of ordered) {
+    const group = dedupeGroupForSource(source);
     const tokens = tokenize(paragraph);
     if (tokens.size < minTokenOverlap) {
       kept.push(paragraph);
-      keptTokenSets.push(tokens);
+      keptMeta.push({ tokens, group });
       continue;
     }
     let dup = false;
-    for (const prev of keptTokenSets) {
-      if (tokenJaccard(tokens, prev) >= semanticThreshold) {
+    for (const prev of keptMeta) {
+      if (prev.group !== group) continue;
+      if (tokenJaccard(tokens, prev.tokens) >= semanticThreshold) {
         dup = true;
         break;
       }
@@ -76,7 +86,7 @@ export function mergeAndDedupeInjectionParts(
       continue;
     }
     kept.push(paragraph);
-    keptTokenSets.push(tokens);
+    keptMeta.push({ tokens, group });
   }
 
   const keptSources = [...new Set(parts.map((p) => p.source).filter(Boolean))];

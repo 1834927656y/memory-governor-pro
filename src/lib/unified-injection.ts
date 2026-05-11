@@ -74,12 +74,24 @@ export function enforceLayerBudgets(
 
 export function formatGovernanceRows(rows: Array<Record<string, unknown>>, maxSummaryChars = 220): string {
   if (!rows.length) return "";
+  const isNoisyGovernanceSummary = (raw: string): boolean => {
+    const s = String(raw || "").trim();
+    if (!s) return true;
+    if (/^found\s+\d+\s+(candidate|candidates|memories)\b/i.test(s)) return true;
+    if (/specify\s+memoryid\b/i.test(s)) return true;
+    if (/^undefined\b/i.test(s)) return true;
+    if (/\btool(result)?\b/i.test(s) && /\b(candidates|memoryid)\b/i.test(s)) return true;
+    if (/<relevant-memories>|<governance-memories>|untrusted data/i.test(s)) return true;
+    if (/context-flush-resume/i.test(s) && /(已过期的会话|原始任务上下文已丢失|虚警)/i.test(s)) return true;
+    return false;
+  };
   const shortRows = rows.map((r) => ({
     type: typeof r.type === "string" ? r.type : "fact",
     summary: String(r.summary || r.text || "").slice(0, maxSummaryChars),
     date: typeof r.date === "string" ? r.date : "",
     tags: Array.isArray(r.tags) ? (r.tags as string[]).filter((x) => typeof x === "string") : [],
-  }));
+  })).filter((r) => !isNoisyGovernanceSummary(r.summary));
+  if (!shortRows.length) return "";
   return toToonBlock(shortRows);
 }
 

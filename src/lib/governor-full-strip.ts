@@ -122,11 +122,27 @@ export async function runGovernorFullStrip(params: {
       });
     }
 
-    archivedDir = path.join(config.archiveRoot, "governor-full", runId);
-    ensureDir(archivedDir);
+    // Archive is best-effort: sessions can be rotated/reset concurrently.
+    // Do not leave empty run folders behind when copy fails (ENOENT, etc.).
+    const archivedDirCandidate = path.join(config.archiveRoot, "governor-full", runId);
+    let copied = 0;
     for (const filePath of files) {
-      const dest = path.join(archivedDir, path.basename(filePath));
-      fs.copyFileSync(filePath, dest);
+      try {
+        // Fast existence check avoids creating empty archive dirs due to ENOENT.
+        if (!fs.existsSync(filePath)) continue;
+        if (!archivedDir) {
+          ensureDir(archivedDirCandidate);
+          archivedDir = archivedDirCandidate;
+        }
+        const dest = path.join(archivedDir, path.basename(filePath));
+        fs.copyFileSync(filePath, dest);
+        copied += 1;
+      } catch (e) {
+        logger.warn("governor.full_strip.archive_copy_failed", { filePath, err: String(e) });
+      }
+    }
+    if (!archivedDir && copied === 0) {
+      logger.warn("governor.full_strip.archive_skipped", { reason, runId, copied });
     }
 
     const mergedFrom = [...files];

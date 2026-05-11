@@ -30,6 +30,8 @@ export interface MemoryEntry {
   metadata?: string; // JSON string for extensible metadata
 }
 
+export type NewMemoryEntry = Omit<MemoryEntry, "id" | "timestamp">;
+
 export interface MemorySearchResult {
   entry: MemoryEntry;
   score: number;
@@ -220,6 +222,30 @@ export class MemoryStore {
     return this.config.dbPath;
   }
 
+  /**
+   * Eagerly release LanceDB native resources.
+   *
+   * LanceDB connections/tables are eventually released by GC, but long-running
+   * hosts and black-box lifecycle tests need deterministic shutdown so native
+   * worker threads / caches do not keep the process alive after plugin stop.
+   */
+  close(): void {
+    try {
+      (this.table as unknown as { close?: () => void } | null)?.close?.();
+    } catch {
+      /* best-effort shutdown */
+    }
+    try {
+      (this.db as unknown as { close?: () => void } | null)?.close?.();
+    } catch {
+      /* best-effort shutdown */
+    }
+    this.table = null;
+    this.db = null;
+    this.initPromise = null;
+    this.ftsIndexCreated = false;
+  }
+
   private async ensureInitialized(): Promise<void> {
     if (this.table) {
       return;
@@ -308,7 +334,7 @@ export class MemoryStore {
       };
 
       try {
-        table = await db.createTable(TABLE_NAME, [schemaEntry]);
+        table = await db.createTable(TABLE_NAME, [schemaEntry as unknown as Record<string, unknown>]);
         await table.delete('id = "__schema__"');
       } catch (createErr) {
         // Race: another caller (or eventual consistency) created the table
@@ -373,7 +399,7 @@ export class MemoryStore {
   }
 
   async store(
-    entry: Omit<MemoryEntry, "id" | "timestamp">,
+    entry: NewMemoryEntry,
   ): Promise<MemoryEntry> {
     await this.ensureInitialized();
 
@@ -381,12 +407,12 @@ export class MemoryStore {
       ...entry,
       id: randomUUID(),
       timestamp: Date.now(),
-      metadata: entry.metadata || "{}",
+      metadata: typeof entry.metadata === "string" ? entry.metadata : "{}",
     };
 
     return this.runWithFileLock(async () => {
       try {
-        await this.table!.add([fullEntry]);
+        await this.table!.add([fullEntry as unknown as Record<string, unknown>]);
       } catch (err: any) {
         const code = err.code || "";
         const message = err.message || String(err);
@@ -428,7 +454,7 @@ export class MemoryStore {
     };
 
     return this.runWithFileLock(async () => {
-      await this.table!.add([full]);
+      await this.table!.add([full as unknown as Record<string, unknown>]);
       return full;
     });
   }
@@ -962,7 +988,7 @@ export class MemoryStore {
       const resolvedId = escapeSqlLiteral(row.id as string);
       await this.table!.delete(`id = '${resolvedId}'`);
       try {
-        await this.table!.add([updated]);
+        await this.table!.add([updated as unknown as Record<string, unknown>]);
       } catch (addError) {
         const current = await this.getById(original.id).catch(() => null);
         if (current) {
@@ -973,7 +999,7 @@ export class MemoryStore {
         }
 
         try {
-          await this.table!.add([rollbackCandidate]);
+          await this.table!.add([rollbackCandidate as unknown as Record<string, unknown>]);
         } catch (rollbackError) {
           throw new Error(
             `Failed to update memory ${id}: write failed after delete, and rollback also failed. ` +

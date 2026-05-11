@@ -54,7 +54,7 @@ export function readAgentIdsFromOpenclawConfig(
     return ["main"];
   }
   const cfg = readJson<Record<string, unknown>>(openclawConfigPath, {});
-  const list = (cfg.agents as { list?: Array<{ id?: string }> } | undefined)
+  const list = (cfg.agents as { list?: Array<{ id?: string; workspace?: string }> } | undefined)
     ?.list;
   if (!Array.isArray(list) || list.length === 0) {
     return ["main"];

@@ -12,3 +12,5 @@ skills/maintain-memory-lancedb-pro/
 skills/validate-memory-lancedb-pro-pr/
 test/addressing-identity-regression.mjs
 validate-memory-lancedb-pro-pr/
+
+.omx/

@@ -28,7 +28,7 @@ export interface ReflectionItemMetadata {
 export interface ReflectionItemPayload {
   kind: "item-invariant" | "item-derived";
   text: string;
-  metadata: ReflectionItemMetadata;
+  metadata: ReflectionItemMetadata | Record<string, unknown>;
 }
 
 export interface BuildReflectionItemPayloadsParams {
