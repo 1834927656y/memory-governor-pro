@@ -9,6 +9,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { MemoryRetriever, RetrievalResult } from "./retriever.js";
+import type { RetrievalContext } from "./retriever.js";
 import type { MemoryStore } from "./store.js";
 import { isNoise } from "./noise-filter.js";
 import { isSystemBypassId, resolveScopeFilter, parseAgentIdFromSessionKey, type MemoryScopeManager } from "./scopes.js";
@@ -76,6 +77,10 @@ interface ToolContext {
   /** 与 openclaw.json governor.enabledAgents 白名单一致；未设置则不限制 */
   isAgentGovernorEnabled?: (agentId: string | undefined) => boolean;
 }
+
+type ResolvedToolContext = ToolContext & {
+  agentId: string;
+};
 
 /** governor.enabledAgents 白名单拒绝时供 tool execute 直接返回 */
 function rejectIfGovernorAgentDisabled(
@@ -150,6 +155,484 @@ function matchesExactRecallQuery(entry: { id: string; text: string; metadata?: s
   );
 }
 
+function normalizeLiteralRecallText(value: string): string {
+  return String(value || "")
+    .normalize("NFKC")
+    .toLowerCase()
+    .replace(/^\s*(?:undefined|null)\b(?:\s+(?:undefined|null)\b)*/i, " ")
+    .replace(/^\s*@[\w.-]+\s+/, " ")
+    .replace(/[“”]/g, '"')
+    .replace(/[‘’]/g, "'")
+    .replace(/[‐‑‒–—―]/g, "-")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+type RecallAnchorKind =
+  | "id"
+  | "exact"
+  | "substring"
+  | "reverse-substring"
+  | "anchor"
+  | "token-overlap";
+
+type RecallAnchorScore = {
+  score: number;
+  kind: RecallAnchorKind;
+  matchedAnchors: string[];
+  queryAnchors: string[];
+  missingQueryAnchors: string[];
+};
+
+type AnchorableMemoryEntry = {
+  id: string;
+  text: string;
+  metadata?: string;
+  timestamp?: number;
+  category?: string;
+};
+
+type ResolveMemoryIdResult =
+  | { ok: true; id: string }
+  | { ok: false; message: string; details?: Record<string, unknown> };
+
+function isResolveMemoryIdFailure(
+  result: ResolveMemoryIdResult,
+): result is Extract<ResolveMemoryIdResult, { ok: false }> {
+  return result.ok === false;
+}
+
+function extractComparableAnchors(value: string): string[] {
+  const raw = String(value || "").normalize("NFKC");
+  const normalized = normalizeLiteralRecallText(value);
+  if (!normalized) return [];
+
+  const anchors = new Map<string, number>();
+  const add = (raw: string | undefined) => {
+    const anchor = normalizeLiteralRecallText(raw || "")
+      .replace(/^[#"'`]+|[#"'`.,;:!?，。；：！？]+$/g, "")
+      .trim();
+    if (anchor.length < 2) return;
+    anchors.set(anchor, Math.max(anchors.get(anchor) ?? 0, anchor.length));
+  };
+
+  for (const match of normalized.matchAll(/\b[a-z][a-z0-9_-]{1,31}:[a-z0-9][a-z0-9_.-]{1,63}\b/g)) {
+    add(match[0]);
+  }
+  for (const match of normalized.matchAll(/\b(?:utc|gmt)[+-]\d{1,2}(?::?\d{2})?\b/g)) {
+    add(match[0]);
+  }
+  for (const match of normalized.matchAll(/\b[a-z]+(?:-[a-z0-9]+)+\b/g)) {
+    add(match[0]);
+  }
+  for (const match of normalized.matchAll(/\b[a-z][a-z0-9_.-]*\d[a-z0-9_.-]*\b/g)) {
+    add(match[0]);
+  }
+  for (const match of normalized.matchAll(/[\p{Script=Han}A-Za-z]{2,20}-[A-Za-z0-9]{1,20}/gu)) {
+    add(match[0]);
+  }
+  for (const match of normalized.matchAll(/\b\d{2,4}-\d{1,2}-\d{1,2}\b/g)) {
+    add(match[0]);
+  }
+  for (const match of normalized.matchAll(/\b\d+(?:\.\d+){1,3}\b/g)) {
+    add(match[0]);
+  }
+  for (const match of raw.matchAll(/\b[A-Z][a-z]{2,24}\b/g)) {
+    const token = match[0].toLowerCase();
+    if (![
+      "Remember", "Please", "Plan", "What", "When", "Random", "Avoid",
+      "Never", "Expose", "Hidden", "Final", "The", "This", "That",
+      "Current", "Launch", "Codename", "Owner",
+    ].map((x) => x.toLowerCase()).includes(token)) {
+      add(match[0]);
+    }
+  }
+
+  const naturalPatterns: RegExp[] = [
+    /(?:负责人|归属人|owner)\s*(?:is|是|为|:|：)?\s*([\p{Script=Han}A-Za-z0-9_.-]{2,40})/giu,
+    /([\p{Script=Han}A-Za-z0-9_.-]{2,40})\s*(?:负责|owner)/giu,
+    /(?:项目代号|代号|codename|launch codename)\s*(?:is|是|为|:|：)?\s*([\p{Script=Han}A-Za-z0-9_.-]{2,40})/giu,
+    /(?:窗口|时间|部署窗口|timezone|时区)\s*(?:is|是|为|在|:|：)?\s*([\p{Script=Han}A-Za-z0-9_\/+:-]{2,40})/giu,
+    /(周[一二三四五六日天](?:上午|下午|晚上|早上)?|下周[一二三四五六日天](?:上午|下午|晚上|早上)?|月底前|晚上九点|上午|下午|晚上)/giu,
+    /(上线复盘|发布计划|风险评估|协作总结|客服培训|数据迁移|渠道上线|灰度|迁移计划|风险清单|推进表|排期)/giu,
+    /(先列风险|先列证据|先列负责人|先列时间线|先列依赖|先列阻塞项|先给结论|先给下一步|risk-first|concise|structured)/giu,
+  ];
+  for (const pattern of naturalPatterns) {
+    for (const match of raw.matchAll(pattern)) {
+      add(match[1] || match[0]);
+    }
+  }
+
+  const values = [...anchors.keys()]
+    .filter((anchor) => {
+      // If a more specific extracted anchor already contains this one, keep
+      // only the specific form. This is what prevents amber-river from
+      // satisfying a query for amber-river-49mcr.
+      return ![...anchors.keys()].some((other) =>
+        other !== anchor &&
+        other.length > anchor.length &&
+        (other.includes(anchor) || other.startsWith(`${anchor}-`) || other.startsWith(`${anchor}:`)),
+      );
+    });
+  return values.sort((a, b) => b.length - a.length || a.localeCompare(b));
+}
+
+function metadataComparableAnchors(meta: ReturnType<typeof parseSmartMetadata>): string[] {
+  const raw = meta.recall_anchors;
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .filter((x): x is string => typeof x === "string")
+    .map(normalizeLiteralRecallText)
+    .filter((x) => x.length >= 2);
+}
+
+function buildRecallAnchors(text: string, category?: string): string[] {
+  const anchors = new Set<string>();
+  for (const anchor of extractComparableAnchors(text)) anchors.add(anchor);
+
+  const normalized = normalizeLiteralRecallText(text);
+  if (category) {
+    for (const anchor of [...anchors]) {
+      anchors.add(`${category}:${anchor}`);
+    }
+  }
+
+  const labelPatterns: RegExp[] = [
+    /(?:项目代号|代号|codename|launch codename)\s*(?:is|是|为|:|：)?\s*([\p{Script=Han}A-Za-z0-9_.-]{2,40})/giu,
+    /(?:owner|负责人|归属人)\s*(?:is|是|为|:|：)?\s*([\p{Script=Han}A-Za-z0-9_.-]{2,40})/giu,
+    /(?:timezone|时区)\s*(?:is|是|为|:|：)?\s*([A-Za-z_\/+-]{2,40}(?:\d{1,2})?)/giu,
+    /(?:ticket|issue|工单|编号)\s*(?:is|是|为|:|：)?\s*([A-Za-z]+-\d+|\d{3,})/giu,
+  ];
+  for (const pattern of labelPatterns) {
+    for (const match of normalized.matchAll(pattern)) {
+      const value = normalizeLiteralRecallText(match[1] || "");
+      if (value.length >= 2) anchors.add(value);
+    }
+  }
+
+  return [...anchors].sort((a, b) => b.length - a.length || a.localeCompare(b)).slice(0, 32);
+}
+
+function entryComparableTexts(entry: AnchorableMemoryEntry): string[] {
+  const meta = parseSmartMetadata(entry.metadata, entry as any);
+  const values = [
+    entry.text,
+    meta.l0_abstract,
+    meta.l1_overview,
+    meta.l2_content,
+    ...metadataComparableAnchors(meta),
+    typeof meta.fact_key === "string" ? meta.fact_key : "",
+    typeof meta.canonical_id === "string" ? meta.canonical_id : "",
+  ];
+  return [...new Set(values.map(normalizeLiteralRecallText).filter(Boolean))];
+}
+
+function literalRecallAnalysis(entry: AnchorableMemoryEntry, query: string): RecallAnchorScore {
+  const needle = normalizeLiteralRecallText(query);
+  if (!needle) {
+    return { score: 0, kind: "token-overlap", matchedAnchors: [], queryAnchors: [], missingQueryAnchors: [] };
+  }
+  if (entry.id.toLowerCase().startsWith(needle)) {
+    return { score: 1, kind: "id", matchedAnchors: [needle], queryAnchors: [needle], missingQueryAnchors: [] };
+  }
+
+  const meta = parseSmartMetadata(entry.metadata, entry as any);
+  const haystacks = entryComparableTexts(entry);
+
+  for (const hay of haystacks) {
+    if (hay === needle) {
+      return { score: 1, kind: "exact", matchedAnchors: [], queryAnchors: [], missingQueryAnchors: [] };
+    }
+    if (hay.includes(needle)) {
+      return {
+        score: Math.min(0.99, 0.78 + needle.length * 0.002),
+        kind: "substring",
+        matchedAnchors: [],
+        queryAnchors: [],
+        missingQueryAnchors: [],
+      };
+    }
+    if (needle.includes(hay) && hay.length >= 12) {
+      return {
+        score: Math.min(0.92, 0.72 + hay.length * 0.002),
+        kind: "reverse-substring",
+        matchedAnchors: [],
+        queryAnchors: [],
+        missingQueryAnchors: [],
+      };
+    }
+  }
+
+  const queryAnchors = extractComparableAnchors(query);
+  if (queryAnchors.length > 0) {
+    const entryAnchors = new Set([
+      ...metadataComparableAnchors(meta),
+      ...extractComparableAnchors(entry.text),
+      ...extractComparableAnchors(meta.l0_abstract),
+      ...extractComparableAnchors(meta.l1_overview),
+      ...extractComparableAnchors(meta.l2_content),
+      ...(typeof meta.fact_key === "string" ? extractComparableAnchors(meta.fact_key) : []),
+      ...(typeof meta.canonical_id === "string" ? extractComparableAnchors(meta.canonical_id) : []),
+    ]);
+    const matched = queryAnchors.filter((anchor) => {
+      if (entryAnchors.has(anchor)) return true;
+      return haystacks.some((hay) => hay.includes(anchor));
+    });
+    if (matched.length > 0 && matched.length === queryAnchors.length) {
+      const coverage = matched.length / queryAnchors.length;
+      const longest = Math.max(...matched.map((x) => x.length));
+      return {
+        score: Math.min(0.995, 0.86 + coverage * 0.1 + Math.min(0.03, longest * 0.001)),
+        kind: "anchor",
+        matchedAnchors: matched,
+        queryAnchors,
+        missingQueryAnchors: queryAnchors.filter((anchor) => !matched.includes(anchor)),
+      };
+    }
+    if (matched.length > 0) {
+      return {
+        score: Math.min(0.74, 0.4 + (matched.length / queryAnchors.length) * 0.3),
+        kind: "token-overlap",
+        matchedAnchors: matched,
+        queryAnchors,
+        missingQueryAnchors: queryAnchors.filter((anchor) => !matched.includes(anchor)),
+      };
+    }
+  }
+
+  const tokens = [...new Set(needle.split(/[\s,.;:!?，。；：！？()[\]{}<>"'`/\\|+-]+/g).filter((x) => x.length >= 2))];
+  if (!tokens.length) {
+    return { score: 0, kind: "token-overlap", matchedAnchors: [], queryAnchors: [], missingQueryAnchors: [] };
+  }
+  const bestOverlap = Math.max(
+    0,
+    ...haystacks.map((hay) => tokens.filter((token) => hay.includes(token)).length / tokens.length),
+  );
+  return {
+    score: bestOverlap >= 0.75 ? bestOverlap * 0.72 : 0,
+    kind: "token-overlap",
+    matchedAnchors: [],
+    queryAnchors: [],
+    missingQueryAnchors: [],
+  };
+}
+
+function literalRecallScore(entry: AnchorableMemoryEntry, query: string): number {
+  return literalRecallAnalysis(entry, query).score;
+}
+
+function isStrongLiteralKind(kind: RecallAnchorKind): boolean {
+  return kind === "id" || kind === "exact" || kind === "substring" || kind === "anchor";
+}
+
+function entryHasComparableAnchor(entry: AnchorableMemoryEntry, anchor: string): boolean {
+  const needle = normalizeLiteralRecallText(anchor);
+  if (!needle) return false;
+  const meta = parseSmartMetadata(entry.metadata, entry as any);
+  const anchors = new Set([
+    ...metadataComparableAnchors(meta),
+    ...extractComparableAnchors(entry.text),
+    ...extractComparableAnchors(meta.l0_abstract),
+    ...extractComparableAnchors(meta.l1_overview),
+    ...extractComparableAnchors(meta.l2_content),
+  ]);
+  if (anchors.has(needle)) return true;
+  return entryComparableTexts(entry).some((hay) => hay.includes(needle));
+}
+
+function ambiguityTokens(value: string): string[] {
+  const stop = new Set([
+    "what", "when", "current", "please", "create", "plan", "with", "the",
+    "and", "for", "that", "this", "我的", "当前", "什么", "应该", "请问",
+    "请", "一下", "怎么", "如何", "偏好", "规则",
+  ]);
+  return [...new Set(
+    normalizeLiteralRecallText(value)
+      .split(/[\s,.;:!?，。；：！？()[\]{}<>"'`/\\|+-]+/g)
+      .filter((x) => x.length >= 2 && !stop.has(x)),
+  )];
+}
+
+function sharedAnchorTokens(value: string): string[] {
+  const keep = new Set([
+    "上线复盘", "发布回答", "发布计划", "风险评估", "协作总结", "客服培训", "数据迁移",
+    "渠道上线", "灰度", "迁移计划", "风险清单", "推进表", "排期",
+    "rollout", "migration", "matrix", "checklist", "timeline", "risks",
+    "blockers", "tradeoffs", "owner", "severity",
+  ]);
+  const normalized = normalizeLiteralRecallText(value);
+  const anchors = [
+    ...extractComparableAnchors(value).filter((anchor) => keep.has(anchor)),
+    ...[...keep].filter((anchor) => normalized.includes(anchor)),
+  ];
+  const tokens = ambiguityTokens(value).filter((token) => keep.has(token));
+  return [...new Set([...anchors, ...tokens])];
+}
+
+function distinguishingAnchorTokens(entry: AnchorableMemoryEntry): string[] {
+  const meta = parseSmartMetadata(entry.metadata, entry as any);
+  const all = extractComparableAnchors(
+    `${entry.text}\n${meta.l0_abstract}\n${meta.l1_overview}\n${meta.l2_content}\n${metadataComparableAnchors(meta).join(" ")}`,
+  );
+  const shared = new Set(sharedAnchorTokens(entry.text));
+  return all.filter((anchor) => !shared.has(anchor));
+}
+
+function jaccard(a: string[], b: string[]): number {
+  if (!a.length || !b.length) return 0;
+  const aa = new Set(a);
+  const bb = new Set(b);
+  let intersection = 0;
+  for (const item of aa) if (bb.has(item)) intersection += 1;
+  return intersection / Math.max(1, new Set([...aa, ...bb]).size);
+}
+
+function areRecallResultsSimilar(a: RetrievalResult, b: RetrievalResult): boolean {
+  if (a.entry.category !== b.entry.category) return false;
+  const aAnchors = extractComparableAnchors(a.entry.text);
+  const bAnchors = extractComparableAnchors(b.entry.text);
+  const sharedAnchors = aAnchors.filter((anchor) => bAnchors.includes(anchor));
+  if (sharedAnchors.length > 0) return true;
+  return jaccard(ambiguityTokens(a.entry.text), ambiguityTokens(b.entry.text)) >= 0.35;
+}
+
+function findAmbiguousSimilarRecall(
+  query: string,
+  results: RetrievalResult[],
+): { candidates: RetrievalResult[]; queryAnchors: string[] } | null {
+  if (results.length < 2) return null;
+  const candidates = results.slice(0, Math.min(5, results.length));
+  const queryShared = sharedAnchorTokens(query);
+  if (queryShared.length > 0) {
+    const topicMatched = candidates.filter((candidate) => {
+      const candidateShared = sharedAnchorTokens(candidate.entry.text);
+      return queryShared.some((anchor) => candidateShared.includes(anchor));
+    });
+    if (topicMatched.length >= 2) {
+      const queryAnchors = extractComparableAnchors(query);
+      const queryDistinguishers = queryAnchors.filter((anchor) => !queryShared.includes(anchor));
+      const matchedDistinguishers = queryDistinguishers.filter((anchor) =>
+        topicMatched.some((result) => entryHasComparableAnchor(result.entry, anchor)),
+      );
+      if (matchedDistinguishers.length === 0) {
+        const distinctCandidateAnchors = new Set<string>();
+        for (const result of topicMatched) {
+          for (const anchor of distinguishingAnchorTokens(result.entry)) distinctCandidateAnchors.add(anchor);
+        }
+        if (distinctCandidateAnchors.size > 0) {
+          return { candidates: topicMatched, queryAnchors };
+        }
+      }
+    }
+  }
+
+  const similarToTop = candidates.filter((candidate, index) =>
+    index === 0 || areRecallResultsSimilar(candidates[0], candidate),
+  );
+  if (similarToTop.length < 2) return null;
+
+  const queryAnchors = extractComparableAnchors(query);
+  if (queryAnchors.length === 0) {
+    return { candidates: similarToTop, queryAnchors };
+  }
+
+  const distinguishingAnchors = queryAnchors.filter((anchor) => {
+    const hitCount = similarToTop.filter((result) => entryHasComparableAnchor(result.entry, anchor)).length;
+    return hitCount === 1;
+  });
+
+  if (distinguishingAnchors.length === 0) {
+    return { candidates: similarToTop, queryAnchors };
+  }
+
+  const distinguishedHits = similarToTop.filter((result) =>
+    distinguishingAnchors.some((anchor) => entryHasComparableAnchor(result.entry, anchor)),
+  );
+  if (distinguishedHits.length !== 1) {
+    return { candidates: similarToTop, queryAnchors };
+  }
+
+  return null;
+}
+
+function resultWithLiteralAnalysis(
+  result: RetrievalResult,
+  query: string,
+): RetrievalResult & { _literal?: RecallAnchorScore } {
+  return { ...result, _literal: literalRecallAnalysis(result.entry, query) };
+}
+
+function compareLiteralAwareResults(
+  a: RetrievalResult & { _literal?: RecallAnchorScore },
+  b: RetrievalResult & { _literal?: RecallAnchorScore },
+): number {
+  const aLit = a._literal;
+  const bLit = b._literal;
+  const aStrong = aLit && aLit.score > 0 && isStrongLiteralKind(aLit.kind) ? 1 : 0;
+  const bStrong = bLit && bLit.score > 0 && isStrongLiteralKind(bLit.kind) ? 1 : 0;
+  if (aStrong !== bStrong) return bStrong - aStrong;
+  const aLitScore = aLit?.score ?? 0;
+  const bLitScore = bLit?.score ?? 0;
+  if (Math.abs(aLitScore - bLitScore) > 0.000001) return bLitScore - aLitScore;
+  return b.score - a.score || b.entry.timestamp - a.entry.timestamp;
+}
+
+function stripLiteralAnalysis(result: RetrievalResult & { _literal?: RecallAnchorScore }): RetrievalResult {
+  const { _literal, ...clean } = result;
+  return clean;
+}
+
+async function mergeLiteralRecallFallback(params: {
+  store: MemoryStore;
+  query: string;
+  results: RetrievalResult[];
+  limit: number;
+  scopeFilter?: string[];
+  category?: string;
+  workspaceBoundary?: WorkspaceBoundaryConfig;
+}): Promise<RetrievalResult[]> {
+  const existing = new Set(params.results.map((r) => r.entry.id));
+  const scanLimit = Math.max(500, params.limit * 100);
+  const listed = await params.store.list(params.scopeFilter, params.category, scanLimit, 0);
+  const literal = listed
+    .filter((entry) => !existing.has(entry.id))
+    .map((entry) => {
+      const analysis = literalRecallAnalysis(entry, params.query);
+      return { entry, score: analysis.score, analysis };
+    })
+    .filter((x) => x.score > 0 && x.analysis.kind !== "token-overlap")
+    .sort((a, b) => b.score - a.score || b.entry.timestamp - a.entry.timestamp)
+    .slice(0, params.limit)
+    .map((x, index): RetrievalResult => ({
+      entry: x.entry,
+      score: x.score,
+      sources: {
+        bm25: { score: x.score, rank: index + 1 },
+        fused: { score: x.score },
+      },
+    }));
+  const ambiguousCandidates = findAmbiguousSimilarRecall(
+    params.query,
+    listed.map((entry): RetrievalResult => ({
+      entry,
+      score: literalRecallAnalysis(entry, params.query).score,
+      sources: { bm25: { score: 0, rank: 0 }, fused: { score: 0 } },
+    })),
+  )?.candidates ?? [];
+
+  const merged = [...ambiguousCandidates, ...literal, ...params.results]
+    .map((result) => resultWithLiteralAnalysis(result, params.query))
+    .sort(compareLiteralAwareResults)
+    .map(stripLiteralAnalysis);
+  const seen = new Set<string>();
+  const deduped = merged.filter((result) => {
+    if (seen.has(result.entry.id)) return false;
+    seen.add(result.entry.id);
+    return true;
+  });
+  return filterUserMdExclusiveRecallResults(deduped, params.workspaceBoundary).slice(0, params.limit);
+}
+
 function deriveManualMemoryLayer(category: string): "durable" | "working" {
   if (category === "preference" || category === "decision" || category === "fact") {
     return "durable";
@@ -209,7 +692,7 @@ function resolveRuntimeAgentId(
 function resolveToolContext(
   base: ToolContext,
   runtimeCtx: unknown,
-): ToolContext {
+): ResolvedToolContext {
   return {
     ...base,
     agentId: resolveRuntimeAgentId(base.agentId, runtimeCtx),
@@ -222,12 +705,7 @@ async function sleep(ms: number): Promise<void> {
 
 async function retrieveWithRetry(
   retriever: MemoryRetriever,
-  params: {
-    query: string;
-    limit: number;
-    scopeFilter?: string[];
-    category?: string;
-  },
+  params: RetrievalContext,
 ): Promise<RetrievalResult[]> {
   let results = await retriever.retrieve(params);
   if (results.length === 0) {
@@ -240,11 +718,8 @@ async function retrieveWithRetry(
 async function resolveMemoryId(
   context: ToolContext,
   memoryRef: string,
-  scopeFilter: string[],
-): Promise<
-  | { ok: true; id: string }
-  | { ok: false; message: string; details?: Record<string, unknown> }
-> {
+  scopeFilter: string[] | undefined,
+): Promise<ResolveMemoryIdResult> {
   const trimmed = memoryRef.trim();
   if (!trimmed) {
     return {
@@ -737,10 +1212,77 @@ export function registerMemoryRecallTool(
             results = results.filter((r) => matchesExactRecallQuery(r.entry, query));
           }
 
+          // Generic literal fallback: vector-only retrieval can miss freshly
+          // stored exact text when embeddings are noisy or the query is a long
+          // mixed-language sentence. Manual recall should still be able to find
+          // entries by exact/substring text or metadata without requiring users
+          // to know the memory id.
+          results = await mergeLiteralRecallFallback({
+            store: runtimeContext.store,
+            query,
+            results,
+            limit: safeLimit,
+            scopeFilter,
+            category,
+            workspaceBoundary: runtimeContext.workspaceBoundary,
+          });
+
+          // Similar-memory guard: if the query contains concrete anchors
+          // (codename, owner, ticket, timezone, version, etc.), exact anchor
+          // hits must outrank broad semantic neighbors. This prevents queries
+          // like "blue-raven owner" from returning "silver-fox owner" first
+          // merely because both memories are semantically close.
+          const queryAnchors = extractComparableAnchors(query);
+          if (queryAnchors.length > 0) {
+            const anchorRanked = results
+              .map((result) => resultWithLiteralAnalysis(result, query))
+              .sort(compareLiteralAwareResults);
+            const strong = anchorRanked.filter((result) =>
+              result._literal &&
+              result._literal.score > 0 &&
+              isStrongLiteralKind(result._literal.kind),
+            );
+            if (strong.length > 0) {
+              const weak = anchorRanked.filter((result) => !strong.some((s) => s.entry.id === result.entry.id));
+              results = [...strong, ...weak].slice(0, safeLimit).map(stripLiteralAnalysis);
+            } else {
+              results = anchorRanked.slice(0, safeLimit).map(stripLiteralAnalysis);
+            }
+          }
+
           if (results.length === 0) {
             return {
               content: [{ type: "text", text: "No relevant memories found." }],
               details: { count: 0, query, scopes: scopeFilter },
+            };
+          }
+
+          const ambiguity = findAmbiguousSimilarRecall(query, results);
+          if (ambiguity) {
+            const candidateSummaries = ambiguity.candidates.map((result, index) => {
+              const meta = parseSmartMetadata(result.entry.metadata, result.entry);
+              const anchors = extractComparableAnchors(
+                `${result.entry.text}\n${meta.l0_abstract}\n${metadataComparableAnchors(meta).join(" ")}`,
+              ).slice(0, 8);
+              return `${index + 1}. [${result.entry.id}] ${truncateText(normalizeInlineText(meta.l0_abstract || result.entry.text), 140)}${anchors.length ? ` (区分点: ${anchors.join(", ")})` : ""}`;
+            }).join("\n");
+            return {
+              content: [
+                {
+                  type: "text",
+                  text:
+                    "Found multiple similar memories; please add a distinguishing detail (for example owner, project/codename, time window, ticket, or exact preference) to avoid mixing them.\n\n" +
+                    candidateSummaries,
+                },
+              ],
+              details: {
+                error: "ambiguous_similar_memories",
+                count: ambiguity.candidates.length,
+                query,
+                queryAnchors: ambiguity.queryAnchors,
+                memories: sanitizeMemoryForSerialization(ambiguity.candidates),
+                scopes: scopeFilter,
+              },
             };
           }
 
@@ -981,6 +1523,7 @@ export function registerMemoryStoreTool(
                   l0_abstract: text,
                   l1_overview: `- ${text}`,
                   l2_content: text,
+                  recall_anchors: buildRecallAnchors(text, category as string),
                   source: "manual",
                   state: "confirmed",
                   memory_layer: deriveManualMemoryLayer(category as string),
@@ -1881,7 +2424,7 @@ export function registerMemoryPromoteTool(
         name: "memory_promote",
         label: "Memory Promote",
         description:
-          "Promote a memory into confirmed/durable governance state so it can participate in conservative auto-recall.",
+          "Promote a memory into confirmed/durable governance state (tiering, audits, and other lifecycle tooling).",
         parameters: Type.Object({
           memoryId: Type.Optional(
             Type.String({ description: "Memory id (UUID/prefix). Optional when query is provided." }),
@@ -1943,7 +2486,7 @@ export function registerMemoryPromoteTool(
             memoryId ?? query ?? "",
             scopeFilter,
           );
-          if (!resolved.ok) {
+          if (isResolveMemoryIdFailure(resolved)) {
             return {
               content: [{ type: "text", text: resolved.message }],
               details: resolved.details ?? { error: "resolve_failed" },
@@ -2008,7 +2551,7 @@ export function registerMemoryArchiveTool(
         name: "memory_archive",
         label: "Memory Archive",
         description:
-          "Archive a memory to remove it from default auto-recall while preserving history.",
+          "Archive a memory while preserving history. Strong retrieval hits may still be auto-injected; use explicit suppression workflows if a row must stay out of context.",
         parameters: Type.Object({
           memoryId: Type.Optional(Type.String({ description: "Memory id (UUID/prefix)." })),
           query: Type.Optional(Type.String({ description: "Search query when memoryId is omitted." })),
@@ -2048,7 +2591,7 @@ export function registerMemoryArchiveTool(
             memoryId ?? query ?? "",
             scopeFilter,
           );
-          if (!resolved.ok) {
+          if (isResolveMemoryIdFailure(resolved)) {
             return {
               content: [{ type: "text", text: resolved.message }],
               details: resolved.details ?? { error: "resolve_failed" },
@@ -2224,7 +2767,6 @@ export function registerMemoryExplainRankTool(
             query,
             limit: safeLimit,
             scopeFilter,
-            source: "manual",
           });
           if (results.length === 0) {
             return {

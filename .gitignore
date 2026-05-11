@@ -6,6 +6,7 @@ memory-plugin-feature-dev
 memory-plugin-host-validation
 memory-plugin-release-consistency
 maintain-memory-lancedb-pro/
+state/
 skills/handle-memory-lancedb-pro-issue/
 skills/maintain-memory-lancedb-pro/
 skills/validate-memory-lancedb-pro-pr/

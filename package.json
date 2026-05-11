@@ -53,12 +53,15 @@
     "governor:purge-refine-artifact-dirs": "node --import jiti/register src/index.ts purge-refine-artifact-dirs",
     "governor:archive-prune": "node --import jiti/register src/index.ts archive-prune",
     "governor:verify-layered-injection": "node scripts/verify-layered-injection.mjs",
+    "governor:release-gate-collaboration": "node --import jiti/register scripts/release-gate-collaboration.ts",
+    "governor:release-gate-full": "node scripts/release-gate-full.mjs",
     "governor:test-full-strip": "node --import jiti/register scripts/test-governor-full-strip.ts",
     "governor:sync-plugin-load-paths": "node scripts/sync-plugin-load-paths.mjs",
     "governor:plugin:install": "node scripts/manage-plugin-install.mjs install",
     "governor:plugin:uninstall": "node scripts/manage-plugin-install.mjs uninstall",
     "governor:vendor:init-self-improving": "node --import jiti/register src/index.ts vendor:init-self-improving",
-    "version": "node scripts/sync-plugin-version.mjs openclaw.plugin.json package.json && git add openclaw.plugin.json"
+    "version": "node scripts/sync-plugin-version.mjs openclaw.plugin.json package.json && git add openclaw.plugin.json",
+    "governor:test-blackbox-random": "node --import jiti/register scripts/blackbox-random-qa.mjs"
   },
   "devDependencies": {
     "commander": "^14.0.0",

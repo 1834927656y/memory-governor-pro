@@ -1,3 +1,8 @@
 node_modules/
 .git/
+.omx/
+state/
+ISSUES_SUMMARY.md
+memories.json
 *.zip
+npm-debug.log*
