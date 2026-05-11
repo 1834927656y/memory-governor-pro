@@ -346,7 +346,7 @@ npm run governor:verify-layered-injection
 
 ### 发布验证结果
 
-本仓库当前版本已经完成发布前验证，结论是：**可以上线，建议先灰度/β 发布。**
+本仓库当前版本已经完成发布前验证
 
 验证项：
 
@@ -366,7 +366,6 @@ npm run governor:verify-layered-injection
 - 真实用户式自然语言黑盒通过
 - 相似记忆可按 owner / 项目 / 时间窗 / 主题区分，不会靠前缀混淆
 - 区分条件不足时会返回歧义，而不是猜测
-- `.omx/`、`state/`、`ISSUES_SUMMARY.md`、`memories.json` 不会进入发布包
 
 仍建议关注的非阻塞风险：
 
